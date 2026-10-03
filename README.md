@@ -4,12 +4,6 @@ A private clipboard for a few people on your own server. Paste text or drop a fi
 
 Licensed under the MIT license.
 
-## Honest limit
-
-Item names, text, and file bytes are encrypted in the browser with a key derived from the password. The server never receives the password or that key, so a copy of the database, the disk, or a backup does not reveal items.
-
-This does not help if the host is fully compromised and serves different JavaScript. That page can read the password as it is typed. Serve Drop over HTTPS, keep the machine updated, and treat a machine you no longer trust as able to steal the password. A weak password can also be guessed offline by someone who has the database. Use a long one.
-
 ## Run
 
 One container. The setup secret is not baked into the image. Until the first admin exists, `SETUP_SECRET` must be at least 16 characters. After that it is ignored.
