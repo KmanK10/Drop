@@ -1,5 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Copy, Download, FileText, Lock, Trash2 } from "lucide-react";
+import { messageOf } from "@/lib/api";
+import { canCopyFile, copyFileItem } from "@/lib/clipboard";
 import { formatBytes, formatWhen } from "@/lib/format";
 import { safeDownloadName, type ItemPlain } from "../../shared/item.ts";
 import { Button } from "@/components/ui/button";
@@ -29,6 +31,9 @@ export function ItemCard({
   onDelete: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const copyingRef = useRef(false);
   const plain = item.plain;
 
   async function copyText() {
@@ -36,6 +41,24 @@ export function ItemCard({
     await navigator.clipboard.writeText(plain.text);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1200);
+  }
+
+  async function copyFile() {
+    if (!plain || plain.kind !== "file" || copyingRef.current) return;
+    copyingRef.current = true;
+    setCopying(true);
+    setCopyError("");
+    try {
+      await copyFileItem(plain);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch (error) {
+      setCopied(false);
+      setCopyError(messageOf(error));
+    } finally {
+      copyingRef.current = false;
+      setCopying(false);
+    }
   }
 
   function download() {
@@ -80,7 +103,15 @@ export function ItemCard({
       {plain?.kind === "file" ? (
         <p className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
           <FileText className="size-4" aria-hidden="true" />
-          Download decrypts it on this device.
+          {canCopyFile(plain.mime)
+            ? "Copy puts it on the clipboard. Download saves the file."
+            : "Download decrypts it on this device."}
+        </p>
+      ) : null}
+
+      {copyError ? (
+        <p role="alert" className="mt-3 text-sm text-destructive">
+          {copyError}
         </p>
       ) : null}
 
@@ -101,6 +132,12 @@ export function ItemCard({
           <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={() => void copyText()}>
             <Copy />
             {copied ? "Copied" : "Copy"}
+          </Button>
+        ) : null}
+        {plain?.kind === "file" && canCopyFile(plain.mime) ? (
+          <Button size="sm" variant="outline" className="h-11 sm:h-9" disabled={copying} onClick={() => void copyFile()}>
+            <Copy />
+            {copied ? "Copied" : copying ? "Copying…" : "Copy"}
           </Button>
         ) : null}
         {plain?.kind === "file" ? (

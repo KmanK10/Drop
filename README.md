@@ -2,6 +2,8 @@
 
 A private clipboard for a few people on your own server. Paste text or drop a file in a signed-in browser and it shows up on that person's other devices. Accounts are separate. The server stores ciphertext, not the items.
 
+Text copies straight back to the clipboard. An image does too, after this browser decrypts it, so the picture can be pasted into another app. If the browser will not accept that image type, Drop converts it to PNG and copies the PNG. Text-like files, including SVG, copy as text. A PDF, a zip, or any other file the clipboard cannot hold still downloads. Decrypted bytes stay in the browser.
+
 Licensed under the MIT license.
 
 ## Run
