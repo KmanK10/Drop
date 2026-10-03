@@ -1,0 +1,16 @@
+services:
+  drop:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      SETUP_SECRET: ${SETUP_SECRET:?Set SETUP_SECRET}
+      PUBLIC_URL: https://drop.kiefermenard.com
+      COOKIE_SECURE: "true"
+      TRUST_PROXY: "true"
+    volumes:
+      - drop-data:/data
+
+volumes:
+  drop-data:
