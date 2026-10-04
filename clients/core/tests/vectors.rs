@@ -145,12 +145,12 @@ fn settings_file_never_keeps_a_password_or_content_key() {
     let path = dir.join("config.json");
     std::fs::write(
         &path,
-        r#"{"serverUrl":"https://drop.kiefermenard.com","username":"ada","password":"super-secret-password","contentKey":"not-a-real-key"}"#,
+        r#"{"serverUrl":"https://drop.example","username":"ada","password":"super-secret-password","contentKey":"not-a-real-key"}"#,
     )
     .unwrap();
     let settings = load_settings(&path);
     assert_eq!(settings.username, "ada");
-    assert_eq!(settings.server_url, "https://drop.kiefermenard.com");
+    assert_eq!(settings.server_url, "https://drop.example");
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains("super-secret-password"));
     assert!(!text.contains("contentKey"));
@@ -158,13 +158,17 @@ fn settings_file_never_keeps_a_password_or_content_key() {
     save_settings(
         &path,
         &drop_core::Settings {
-            server_url: "https://drop.kiefermenard.com".into(),
+            server_url: "https://drop.example".into(),
             username: "ada".into(),
         },
     )
     .unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(!text.contains("password"));
+    let missing = load_settings(&dir.join("missing.json"));
+    assert_eq!(missing.server_url, "");
+    assert_eq!(missing.username, "");
+    assert!(!drop_core::DEFAULT_SERVER.contains("kiefermenard"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

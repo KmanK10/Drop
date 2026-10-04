@@ -4,7 +4,8 @@ public struct DropSettings: Equatable {
     public var serverURL: String
     public var username: String
 
-    public static let defaultServer = "https://drop.kiefermenard.com"
+    /// No server is built in. The sign-in field starts empty.
+    public static let defaultServer = ""
     public static let empty = DropSettings(serverURL: defaultServer, username: "")
 
     public init(serverURL: String, username: String) {

@@ -5,7 +5,8 @@ use serde_json::Value;
 
 use crate::error::DropError;
 
-pub const DEFAULT_SERVER: &str = "https://drop.kiefermenard.com";
+/// No server is built in. The sign-in field starts empty until this person types their own.
+pub const DEFAULT_SERVER: &str = "";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {

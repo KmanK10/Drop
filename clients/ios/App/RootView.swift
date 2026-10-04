@@ -39,7 +39,7 @@ private struct SignInView: View {
                 Text("The password unlocks items on this phone. It stays in memory until you close Drop, and it is not saved.")
                     .font(.subheadline)
                     .foregroundStyle(DropColor.muted)
-                field("Server", text: $model.server, secure: false)
+                field("Server", text: $model.server, secure: false, placeholder: "https://drop.example")
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
@@ -70,14 +70,14 @@ private struct SignInView: View {
         }
     }
 
-    private func field(_ title: String, text: Binding<String>, secure: Bool) -> some View {
+    private func field(_ title: String, text: Binding<String>, secure: Bool, placeholder: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).foregroundStyle(DropColor.ink)
             Group {
                 if secure {
-                    SecureField(title, text: text)
+                    SecureField(placeholder ?? title, text: text)
                 } else {
-                    TextField(title, text: text)
+                    TextField(placeholder ?? title, text: text)
                 }
             }
             .padding(12)

@@ -69,11 +69,13 @@ final class Vectors: XCTestCase {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("drop-settings-\(ProcessInfo.processInfo.processIdentifier)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let path = dir.appendingPathComponent("config.json")
-        let planted = #"{"serverUrl":"https://drop.kiefermenard.com","username":"ada","password":"super-secret-password","contentKey":"not-a-real-key"}"#
+        let planted = #"{"serverUrl":"https://drop.example","username":"ada","password":"super-secret-password","contentKey":"not-a-real-key"}"#
         try planted.data(using: .utf8)?.write(to: path)
         let settings = DropSettings.load(from: path)
         XCTAssertEqual(settings.username, "ada")
-        XCTAssertEqual(settings.serverURL, "https://drop.kiefermenard.com")
+        XCTAssertEqual(settings.serverURL, "https://drop.example")
+        XCTAssertEqual(DropSettings.empty.serverURL, "")
+        XCTAssertFalse(DropSettings.defaultServer.contains("kiefermenard"))
         let text = try String(contentsOf: path, encoding: .utf8)
         XCTAssertFalse(text.contains("super-secret-password"))
         XCTAssertFalse(text.contains("contentKey"))

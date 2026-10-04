@@ -6,7 +6,7 @@ After you sign in and enter the password once, the session cookie and the conten
 
 There is no public signup. An admin still creates the account in the browser.
 
-The example server address is `https://drop.kiefermenard.com`. Change it on the sign-in screen if your server is somewhere else. `http://` is accepted for a local server and the window says the connection is not HTTPS.
+The server field starts empty. Type the address of your own Drop server. The placeholder `https://drop.example` is not a real host. `http://` is accepted for a local server and the window says the connection is not HTTPS. A server address you already saved is left as it is.
 
 ## What stays the same
 
@@ -29,6 +29,8 @@ Explorer paints the Windows icon, so a file drop is caught by a small layered wi
 
 The window's close button hides Drop. Quit is the control that ends the process and forgets the key. On Windows 11 the icon can land in the notification-area overflow; drag it onto the visible row if you want it beside the clock.
 
+The window follows the system appearance, the same way the website follows `prefers-color-scheme`. Light mode stays the cream palette. Dark mode uses the website's dark colors. The Mac menu-bar icon is a template image, so the menu bar already adapts.
+
 Config paths, server address and username only:
 
 - Windows: `%APPDATA%\Drop\config.json`
@@ -48,18 +50,19 @@ The program is `target/x86_64-pc-windows-gnu/release/drop.exe`. Run that exe on 
 
 ### Mac
 
-Build this on a Mac (the menu-bar code links AppKit):
+Build this on a Mac (the menu-bar code links AppKit). The script makes a disk image, not an App Store package, and it does not codesign:
 
 ```bash
 cd clients
-cargo build --release -p drop-desktop
 ./desktop/package-mac.sh
-open target/release/Drop.app
+open target/release/Drop.dmg
 ```
 
-`package-mac.sh` wraps the binary in an app bundle with `LSUIElement` so it is a menu-bar app. `cargo run --release -p drop-desktop` also works; the process sets the accessory activation policy itself.
+`open` mounts the image. Drag Drop onto the Applications folder in that window, then open Drop from Applications. It is a menu-bar app (`LSUIElement`), so it does not stay in the Dock. The window follows the Mac appearance.
 
-This Linux environment cannot compile or run the Mac tray. The AppKit drop target and the bundle still need a Mac.
+Do not double-click the executable inside `target/`. Finder runs that bare file in Terminal, and the path is several folders down. `cargo run --release -p drop-desktop` also works while you are developing; the process sets the accessory activation policy itself.
+
+This Linux environment cannot compile or run the Mac tray, and it cannot build the disk image (`hdiutil` is a Mac tool). The AppKit drop target and the image still need a Mac.
 
 ## iPhone
 

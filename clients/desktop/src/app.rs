@@ -15,14 +15,75 @@ use crate::icon;
 use crate::tray::{TrayAction, TrayPorts};
 use crate::worker::{self, Command, WorkerEvent};
 
-const GREEN: Color32 = Color32::from_rgb(0x1d, 0x68, 0x43);
-const CREAM: Color32 = Color32::from_rgb(0xf7, 0xf3, 0xea);
-const CARD: Color32 = Color32::from_rgb(0xff, 0xfd, 0xf8);
-const INK: Color32 = Color32::from_rgb(0x1c, 0x19, 0x15);
-const MUTED: Color32 = Color32::from_rgb(0x6d, 0x66, 0x5c);
-const DANGER: Color32 = Color32::from_rgb(0x9d, 0x34, 0x1c);
-const LINE: Color32 = Color32::from_rgb(0xe4, 0xda, 0xc9);
-const ON_GREEN: Color32 = Color32::from_rgb(0xf4, 0xff, 0xf7);
+const SERVER_HINT: &str = "https://drop.example";
+
+/// Same colors as the website. Light stays the cream palette. Dark follows
+/// `prefers-color-scheme` through the system theme egui already reports.
+#[derive(Clone, Copy)]
+struct Palette {
+    background: Color32,
+    card: Color32,
+    field: Color32,
+    ink: Color32,
+    muted: Color32,
+    green: Color32,
+    on_green: Color32,
+    danger: Color32,
+    line: Color32,
+    secondary: Color32,
+    hover: Color32,
+    active: Color32,
+    selection: Color32,
+}
+
+impl Palette {
+    fn light() -> Self {
+        Self {
+            background: Color32::from_rgb(0xf7, 0xf3, 0xea),
+            card: Color32::from_rgb(0xff, 0xfd, 0xf8),
+            field: Color32::from_rgb(0xff, 0xfd, 0xf8),
+            ink: Color32::from_rgb(0x1c, 0x19, 0x15),
+            muted: Color32::from_rgb(0x6d, 0x66, 0x5c),
+            green: Color32::from_rgb(0x1d, 0x68, 0x43),
+            on_green: Color32::from_rgb(0xf4, 0xff, 0xf7),
+            danger: Color32::from_rgb(0x9d, 0x34, 0x1c),
+            line: Color32::from_rgb(0xe4, 0xda, 0xc9),
+            secondary: Color32::from_rgb(0xef, 0xe7, 0xd8),
+            hover: Color32::from_rgb(0xe4, 0xf2, 0xe9),
+            active: Color32::from_rgb(0xd7, 0xeb, 0xde),
+            selection: Color32::from_rgb(0xcf, 0xe6, 0xd6),
+        }
+    }
+
+    fn dark() -> Self {
+        Self {
+            background: Color32::from_rgb(0x12, 0x10, 0x0d),
+            card: Color32::from_rgb(0x26, 0x21, 0x1c),
+            field: Color32::from_rgb(0x1c, 0x19, 0x16),
+            ink: Color32::from_rgb(0xf6, 0xf1, 0xe8),
+            muted: Color32::from_rgb(0xd2, 0xc3, 0xb0),
+            green: Color32::from_rgb(0x7d, 0xce, 0xa0),
+            on_green: Color32::from_rgb(0x10, 0x21, 0x17),
+            danger: Color32::from_rgb(0xf0, 0xa0, 0x90),
+            line: Color32::from_rgb(0x53, 0x48, 0x38),
+            secondary: Color32::from_rgb(0x1c, 0x19, 0x16),
+            hover: Color32::from_rgb(0x1e, 0x33, 0x28),
+            active: Color32::from_rgb(0x27, 0x42, 0x33),
+            selection: Color32::from_rgb(0x2f, 0x5a, 0x40),
+        }
+    }
+
+    fn for_theme(theme: egui::Theme) -> Self {
+        match theme {
+            egui::Theme::Dark => Self::dark(),
+            egui::Theme::Light => Self::light(),
+        }
+    }
+}
+
+fn colors(ui: &egui::Ui) -> Palette {
+    Palette::for_theme(ui.ctx().theme())
+}
 
 pub fn run() -> Result<(), String> {
     let settings_path = drop_core::default_config_dir()
@@ -291,18 +352,19 @@ impl DropApp {
     }
 
     fn sign_in_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = colors(ui);
         wordmark(ui);
         ui.add_space(8.0);
-        ui.label(RichText::new("Sign in").size(18.0).strong().color(INK));
+        ui.label(RichText::new("Sign in").size(18.0).strong().color(colors.ink));
         ui.label(
             RichText::new("The password unlocks items on this device. It is kept in memory until you quit Drop, and it is not saved.")
-                .color(MUTED)
+                .color(colors.muted)
                 .size(13.0),
         );
         ui.add_space(8.0);
-        labeled(ui, "Server", &mut self.server, false);
-        labeled(ui, "Username", &mut self.username, false);
-        ui.label(RichText::new("Password").color(INK));
+        labeled(ui, "Server", &mut self.server, SERVER_HINT);
+        labeled(ui, "Username", &mut self.username, "");
+        ui.label(RichText::new("Password").color(colors.ink));
         let password_id = egui::Id::new(("drop-password", self.password_epoch));
         ui.add(
             TextEdit::singleline(&mut self.password)
@@ -315,20 +377,23 @@ impl DropApp {
             ui.add_space(6.0);
             ui.label(
                 RichText::new("This connection is not HTTPS. The password still stays on this device, but the network can see the session.")
-                    .color(MUTED)
+                    .color(colors.muted)
                     .size(12.0),
             );
         }
         notice(ui, &self.error, &self.status);
         ui.add_space(8.0);
-        let button = ui.add_enabled(!self.busy, primary_button(if self.busy { "Signing in…" } else { "Sign in" }));
+        let button = ui.add_enabled(
+            !self.busy,
+            primary_button(if self.busy { "Signing in…" } else { "Sign in" }, &colors),
+        );
         if button.clicked() {
             self.submit_sign_in();
         }
         ui.add_space(12.0);
         ui.label(
             RichText::new("Accounts are invite-only. Ask the person who runs this Drop for a username. Closing this window keeps Drop in the tray.")
-                .color(MUTED)
+                .color(colors.muted)
                 .size(12.0),
         );
     }
@@ -350,6 +415,7 @@ impl DropApp {
                 }
             });
         });
+        let colors = colors(ui);
         ui.label(
             RichText::new(format!(
                 "{} · {} of {} · kept {}",
@@ -358,13 +424,13 @@ impl DropApp {
                 format_bytes(account.quota_bytes),
                 retention_label(account.ttl_ms)
             ))
-            .color(MUTED)
+            .color(colors.muted)
             .size(12.0),
         );
         if self.http {
             ui.label(
                 RichText::new("This connection is not HTTPS. Items are still encrypted before they are uploaded.")
-                    .color(MUTED)
+                    .color(colors.muted)
                     .size(12.0),
             );
         }
@@ -376,7 +442,7 @@ impl DropApp {
                 .hint_text("Paste or write something"),
         );
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.busy, primary_button("Save text")).clicked() {
+            if ui.add_enabled(!self.busy, primary_button("Save text", &colors)).clicked() {
                 let text = std::mem::take(&mut self.draft);
                 self.busy = true;
                 self.error.clear();
@@ -393,7 +459,7 @@ impl DropApp {
         ui.add_space(8.0);
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if self.items.is_empty() {
-                ui.label(RichText::new("Nothing here yet. Drop a file on the tray icon, or save a note.").color(MUTED));
+                ui.label(RichText::new("Nothing here yet. Drop a file on the tray icon, or save a note.").color(colors.muted));
             }
             let items = self.items.clone();
             for item in items {
@@ -409,20 +475,21 @@ impl DropApp {
         };
         ui.label(
             RichText::new(format!("Closing this window keeps Drop in the {place}. Quit to forget the key."))
-                .color(MUTED)
+                .color(colors.muted)
                 .size(11.0),
         );
     }
 
     fn item_card(&mut self, ui: &mut egui::Ui, item: &ItemSummary) {
+        let colors = colors(ui);
         Frame::none()
-            .fill(CARD)
-            .stroke(Stroke::new(1.0_f32, LINE))
+            .fill(colors.card)
+            .stroke(Stroke::new(1.0_f32, colors.line))
             .inner_margin(Margin::same(10.0))
             .rounding(8.0)
             .show(ui, |ui| {
-                ui.label(RichText::new(&item.title).strong().color(INK));
-                ui.label(RichText::new(format!("{} · {}", item.detail, item.when)).color(MUTED).size(12.0));
+                ui.label(RichText::new(&item.title).strong().color(colors.ink));
+                ui.label(RichText::new(format!("{} · {}", item.detail, item.when)).color(colors.muted).size(12.0));
                 ui.horizontal(|ui| {
                     if item.can_copy && ui.add_enabled(!self.busy, Button::new("Copy")).clicked() {
                         self.busy = true;
@@ -528,62 +595,95 @@ fn show_window(ctx: &Context) {
 }
 
 fn apply_style(ctx: &Context) {
-    let mut visuals = egui::Visuals::light();
-    visuals.window_fill = CREAM;
-    visuals.panel_fill = CREAM;
-    visuals.extreme_bg_color = CARD;
-    visuals.faint_bg_color = Color32::from_rgb(0xef, 0xe7, 0xd8);
-    visuals.widgets.noninteractive.bg_fill = CARD;
-    visuals.widgets.inactive.bg_fill = CARD;
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(0xe4, 0xf2, 0xe9);
-    visuals.widgets.active.bg_fill = Color32::from_rgb(0xd7, 0xeb, 0xde);
-    visuals.override_text_color = Some(INK);
-    visuals.selection.bg_fill = Color32::from_rgb(0xcf, 0xe6, 0xd6);
-    ctx.set_visuals(visuals);
-    let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.button_padding = Vec2::new(10.0, 6.0);
-    ctx.set_style(style);
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        let palette = Palette::for_theme(theme);
+        let mut style = (*ctx.style_of(theme)).clone();
+        style.visuals = paint(theme, palette);
+        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+        style.spacing.button_padding = Vec2::new(10.0, 6.0);
+        ctx.set_style_of(theme, style);
+    }
+    ctx.set_theme(egui::ThemePreference::System);
+}
+
+fn paint(theme: egui::Theme, palette: Palette) -> egui::Visuals {
+    let mut visuals = match theme {
+        egui::Theme::Dark => egui::Visuals::dark(),
+        egui::Theme::Light => egui::Visuals::light(),
+    };
+    visuals.window_fill = palette.background;
+    visuals.panel_fill = palette.background;
+    visuals.extreme_bg_color = palette.field;
+    visuals.faint_bg_color = palette.secondary;
+    visuals.code_bg_color = palette.card;
+    visuals.override_text_color = Some(palette.ink);
+    visuals.hyperlink_color = palette.green;
+    visuals.warn_fg_color = palette.danger;
+    visuals.error_fg_color = palette.danger;
+    visuals.selection.bg_fill = palette.selection;
+    visuals.selection.stroke.color = palette.green;
+    let widgets = &mut visuals.widgets;
+    for widget in [
+        &mut widgets.noninteractive,
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        widget.fg_stroke.color = palette.ink;
+        widget.bg_stroke.color = palette.line;
+    }
+    widgets.noninteractive.bg_fill = palette.card;
+    widgets.inactive.bg_fill = palette.card;
+    widgets.hovered.bg_fill = palette.hover;
+    widgets.active.bg_fill = palette.active;
+    widgets.open.bg_fill = palette.card;
+    visuals
 }
 
 fn wordmark(ui: &mut egui::Ui) {
+    let colors = colors(ui);
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), 16.0, GREEN);
+        ui.painter().circle_filled(rect.center(), 16.0, colors.green);
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             "D",
             egui::FontId::proportional(18.0),
-            ON_GREEN,
+            colors.on_green,
         );
         ui.vertical(|ui| {
-            ui.label(RichText::new("Drop").size(22.0).strong().color(INK));
-            ui.label(RichText::new("Private clipboard").size(11.0).color(MUTED));
+            ui.label(RichText::new("Drop").size(22.0).strong().color(colors.ink));
+            ui.label(RichText::new("Private clipboard").size(11.0).color(colors.muted));
         });
     });
 }
 
-fn labeled(ui: &mut egui::Ui, label: &str, value: &mut String, secret: bool) {
-    ui.label(RichText::new(label).color(INK));
+fn labeled(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
+    let colors = colors(ui);
+    ui.label(RichText::new(label).color(colors.ink));
     let mut edit = TextEdit::singleline(value).desired_width(f32::INFINITY);
-    if secret {
-        edit = edit.password(true);
+    if !hint.is_empty() {
+        edit = edit.hint_text(hint);
     }
     ui.add(edit);
 }
 
-fn primary_button(label: &str) -> Button<'_> {
-    Button::new(RichText::new(label).color(ON_GREEN)).fill(GREEN).min_size(Vec2::new(0.0, 32.0))
+fn primary_button<'a>(label: &'a str, colors: &Palette) -> Button<'a> {
+    Button::new(RichText::new(label).color(colors.on_green))
+        .fill(colors.green)
+        .min_size(Vec2::new(0.0, 32.0))
 }
 
 fn notice(ui: &mut egui::Ui, error: &str, status: &str) {
+    let colors = colors(ui);
     if !error.is_empty() {
         ui.add_space(6.0);
-        ui.label(RichText::new(error).color(DANGER));
+        ui.label(RichText::new(error).color(colors.danger));
     } else if !status.is_empty() {
         ui.add_space(6.0);
-        ui.label(RichText::new(status).color(MUTED));
+        ui.label(RichText::new(status).color(colors.muted));
     }
 }
 
