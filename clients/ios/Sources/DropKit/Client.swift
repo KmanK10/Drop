@@ -15,6 +15,8 @@ public struct DropItem: Equatable, Sendable, Identifiable {
     public var kind: String
     public var title: String
     public var detail: String
+    /// Age from `createdAt`, in the same words the Mac row uses.
+    public var when: String
     public var canCopy: Bool
     public var broken: Bool
     /// A short plain-text snippet for a text file. Notes use `title` for that snippet.
@@ -337,6 +339,7 @@ public final class DropClient: @unchecked Sendable {
             if var existing {
                 existing.summary.createdAt = createdAt
                 existing.summary.size = size
+                existing.summary.when = DropFormat.when(createdAt, nowMs: DropFormat.nowMs())
                 if existing.summary.kind != "text" && !existing.summary.broken {
                     existing.summary.detail = DropFormat.bytes(size)
                 }
@@ -537,6 +540,7 @@ public final class DropClient: @unchecked Sendable {
             kind: plain.kind.rawValue,
             title: summary.title,
             detail: summary.detail,
+            when: DropFormat.when(createdAt, nowMs: DropFormat.nowMs()),
             canCopy: summary.canCopy,
             broken: false,
             previewText: summary.previewText,
@@ -833,6 +837,7 @@ private func broken(id: String, createdAt: Int64, size: UInt64) -> MemoryItem {
             kind: "file",
             title: "Can't decrypt this item",
             detail: DropFormat.bytes(size),
+            when: DropFormat.when(createdAt, nowMs: DropFormat.nowMs()),
             canCopy: false,
             broken: true,
             previewText: nil,

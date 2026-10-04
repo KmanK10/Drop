@@ -103,6 +103,33 @@ pub fn text_preview(text: &str, limit: usize) -> String {
     out
 }
 
+#[cfg(test)]
+mod tests {
+    use super::format_when;
+
+    #[test]
+    fn age_uses_the_desktop_words() {
+        let now = 1_700_000_000_000_i64;
+        assert_eq!(format_when(now, now), "just now");
+        assert_eq!(format_when(now - 14_000, now), "just now");
+        assert_eq!(format_when(now - 14_499, now), "just now");
+        assert_eq!(format_when(now - 14_500, now), "15s ago");
+        assert_eq!(format_when(now - 15_000, now), "15s ago");
+        assert_eq!(format_when(now - 59_000, now), "59s ago");
+        assert_eq!(format_when(now - 60_000, now), "1m ago");
+        assert_eq!(format_when(now - 90_000, now), "2m ago");
+        assert_eq!(format_when(now - 59 * 60_000, now), "59m ago");
+        assert_eq!(format_when(now - 60 * 60_000, now), "1h ago");
+        assert_eq!(format_when(now - 23 * 60 * 60_000, now), "23h ago");
+        assert_eq!(format_when(now - 24 * 60 * 60_000, now), "1d ago");
+        assert_eq!(format_when(now - 6 * 24 * 60 * 60_000, now), "6d ago");
+        assert_eq!(format_when(now - 7 * 24 * 60 * 60_000, now), "Nov 7");
+        assert_eq!(format_when(now - 8 * 24 * 60 * 60_000, now), "Nov 6");
+        assert_eq!(format_when(now - 40 * 24 * 60 * 60_000, now), "Oct 5");
+        assert_eq!(format_when(1_669_852_800_000, now), "Dec 1, 2022");
+    }
+}
+
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

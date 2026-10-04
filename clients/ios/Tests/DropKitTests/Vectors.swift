@@ -28,6 +28,27 @@ final class Vectors: XCTestCase {
         XCTAssertEqual(DropPassword.rejection("short", confirm: "short"), "Use at least 10 characters.")
     }
 
+    func testItemAgeMatchesTheMacWording() {
+        let now: Int64 = 1_700_000_000_000
+        XCTAssertEqual(DropFormat.when(now, nowMs: now), "just now")
+        XCTAssertEqual(DropFormat.when(now - 14_000, nowMs: now), "just now")
+        XCTAssertEqual(DropFormat.when(now - 14_499, nowMs: now), "just now")
+        XCTAssertEqual(DropFormat.when(now - 14_500, nowMs: now), "15s ago")
+        XCTAssertEqual(DropFormat.when(now - 15_000, nowMs: now), "15s ago")
+        XCTAssertEqual(DropFormat.when(now - 59_000, nowMs: now), "59s ago")
+        XCTAssertEqual(DropFormat.when(now - 60_000, nowMs: now), "1m ago")
+        XCTAssertEqual(DropFormat.when(now - 90_000, nowMs: now), "2m ago")
+        XCTAssertEqual(DropFormat.when(now - 59 * 60_000, nowMs: now), "59m ago")
+        XCTAssertEqual(DropFormat.when(now - 60 * 60_000, nowMs: now), "1h ago")
+        XCTAssertEqual(DropFormat.when(now - 23 * 60 * 60_000, nowMs: now), "23h ago")
+        XCTAssertEqual(DropFormat.when(now - 24 * 60 * 60_000, nowMs: now), "1d ago")
+        XCTAssertEqual(DropFormat.when(now - 6 * 24 * 60 * 60_000, nowMs: now), "6d ago")
+        XCTAssertEqual(DropFormat.when(now - 7 * 24 * 60 * 60_000, nowMs: now), "Nov 7")
+        XCTAssertEqual(DropFormat.when(now - 8 * 24 * 60 * 60_000, nowMs: now), "Nov 6")
+        XCTAssertEqual(DropFormat.when(now - 40 * 24 * 60 * 60_000, nowMs: now), "Oct 5")
+        XCTAssertEqual(DropFormat.when(1_669_852_800_000, nowMs: now), "Dec 1, 2022")
+    }
+
     func testPinRulesAreFourToEightDigits() throws {
         XCTAssertEqual(DropPin.rejection("123", confirm: nil), "Use 4 to 8 digits.")
         XCTAssertEqual(DropPin.rejection("123456789", confirm: nil), "Use 4 to 8 digits.")

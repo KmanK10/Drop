@@ -541,7 +541,7 @@ private struct ItemCard: View {
                 .font(.body.weight(.semibold))
                 .foregroundStyle(palette.ink)
                 .lineLimit(item.kind == "text" ? 4 : nil)
-            Text(item.detail).font(.footnote).foregroundStyle(palette.muted)
+            Text("\(item.detail) · \(item.when)").font(.footnote).foregroundStyle(palette.muted)
             if let preview = item.previewText, !preview.isEmpty {
                 Text(preview)
                     .font(.subheadline)
