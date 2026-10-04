@@ -58,7 +58,15 @@ cd clients
 open target/release/Drop.dmg
 ```
 
-`open` mounts the image. Drag Drop onto the Applications folder in that window, then open Drop from Applications. It is a menu-bar app (`LSUIElement`), so it does not stay in the Dock. The window follows the Mac appearance. The app icon does too: `desktop/Assets.xcassets` has a light clipboard and a dark clipboard, and `package-mac.sh` compiles that catalog with `actool` into the bundle (`CFBundleIconName` is `AppIcon`). Launchpad, the Dock, and Finder then use the light field in light mode and the dark field in dark mode. Rebuild the pictures with `python3 desktop/make-icon.py` only if you change the drawing. `actool` comes with Xcode or its command line tools.
+`open` mounts the image. Drag Drop onto the Applications folder in that window, then open Drop from Applications. Replace an older Drop that is already in Applications. It is a menu-bar app (`LSUIElement`), so it does not stay in the Dock. The window follows the Mac appearance.
+
+The app icon follows it too. `desktop/Assets.xcassets` has the clipboard on a light field and, with a `luminosity: dark` appearance, on a dark field. `desktop/AppIcon.icon` is the Icon Composer document current `actool` actually compiles into separate Aqua and DarkAqua renditions: the same mark, with the light plate as the default fill and the dark plate as the dark fill. `package-mac.sh` compiles both into `Assets.car`. `CFBundleIconName` is `AppIcon`. The script does not set `CFBundleIconFile` and deletes any `.icns` `actool` writes, because an icns is the light picture only and Launchpad prefers it over the dark rendition. If Launchpad still shows the previous tile after you replace the app, refresh Launch Services:
+
+```bash
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/Drop.app
+```
+
+Rebuild the pictures with `python3 desktop/make-icon.py` only if you change the drawing (`python3 desktop/make-icon.py --check` reads the luminances and appearances back). `actool` comes with Xcode or its command line tools.
 
 Do not double-click the executable inside `target/`. Finder runs that bare file in Terminal, and the path is several folders down. `cargo run --release -p drop-desktop` also works while you are developing; the process sets the accessory activation policy itself.
 
