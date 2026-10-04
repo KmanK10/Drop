@@ -33,7 +33,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    MF_CHECKED,
+    MF_CHECKED, MF_SEPARATOR,
     DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
     SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow, TrackPopupMenu,
     TranslateMessage, UnhookWindowsHookEx, DestroyIcon, HHOOK, HICON, HMENU, ICONINFO, LWA_ALPHA, MB_ICONINFORMATION,
@@ -350,10 +350,22 @@ fn clipboard_icon(size: u32) -> Vec<u8> {
     rgba
 }
 
+fn append_separator(menu: HMENU) {
+    let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null()) };
+}
+
 fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN, w!("Open"));
+        append_separator(menu);
+        let close_flags = if crate::window_prefs::close_to_menu_bar() {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        let _ = AppendMenuW(menu, close_flags, ID_CLOSE, w!("Close to notification area"));
+        append_separator(menu);
         if crate::biometric::available() {
             let flags = if crate::biometric::enrolled() { MF_STRING | MF_CHECKED } else { MF_STRING };
             let _ = AppendMenuW(menu, flags, ID_HELLO, w!("Windows Hello"));
@@ -365,14 +377,10 @@ fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
             let _ = AppendMenuW(menu, MF_STRING, ID_PIN, w!("Set PIN"));
         }
         let _ = AppendMenuW(menu, MF_STRING, ID_PASSWORD, w!("Change password"));
-        let _ = AppendMenuW(menu, MF_STRING, ID_DELETE, w!("Delete account"));
+        append_separator(menu);
         let _ = AppendMenuW(menu, MF_STRING, ID_SIGNOUT, w!("Sign out"));
-        let close_flags = if crate::window_prefs::close_to_menu_bar() {
-            MF_STRING | MF_CHECKED
-        } else {
-            MF_STRING
-        };
-        let _ = AppendMenuW(menu, close_flags, ID_CLOSE, w!("Close to notification area"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_DELETE, w!("Delete account"));
+        append_separator(menu);
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, w!("Quit"));
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);

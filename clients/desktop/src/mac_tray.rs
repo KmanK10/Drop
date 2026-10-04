@@ -6,10 +6,10 @@
 //! sends those files as an open-documents Apple Event. Closing the window
 //! (back to the menu bar only) removes the Dock icon.
 //!
-//! Touch ID, Sign out, and Quit live in the application menu (the menu named
-//! after the app, immediately to the right of the Apple menu) and in the Dock
-//! icon menu. A right-click on the status item has the same commands as an
-//! extra. This file is compiled on macOS only.
+//! Touch ID, the PIN, Sign out, and Quit Drop live in the application menu
+//! (the menu named after the app, immediately to the right of the Apple menu)
+//! and in the Dock icon menu. A right-click on the status item has the same
+//! commands as an extra. This file is compiled on macOS only.
 
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -349,21 +349,14 @@ unsafe fn install_application_menu(target: *mut AnyObject) {
     }
     if !menu_has_action(app_menu, sel!(menuSignOut:)) {
         let quit_at = find_action(app_menu, sel!(terminate:)).or_else(|| find_action(app_menu, sel!(menuQuit:)));
-        let insert_at = quit_at.unwrap_or_else(|| item_count(app_menu));
-        let mut at = insert_at;
-        if crate::biometric::available() {
-            insert_item(app_menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled(), at);
-            at += 1;
+        let mut at = quit_at.unwrap_or_else(|| item_count(app_menu));
+        // The system menu already has a divider above Quit. Ours replaces it
+        // so About, Hide, and Services stay above a single divider.
+        if at > 0 && item_is_separator(item_at(app_menu, at - 1)) {
+            let _: () = msg_send![app_menu, removeItemAtIndex: at - 1];
+            at -= 1;
         }
-        insert_item(app_menu, if crate::pin::enrolled() { "PIN" } else { "Set PIN" }, sel!(menuPin:), crate::pin::enrolled(), at);
-        at += 1;
-        insert_item(app_menu, "Change PIN", sel!(menuChangePin:), false, at);
-        at += 1;
-        insert_item(app_menu, "Change password", sel!(menuChangePassword:), false, at);
-        at += 1;
-        insert_item(app_menu, "Delete account", sel!(menuDeleteAccount:), false, at);
-        at += 1;
-        insert_item(app_menu, "Sign out", sel!(menuSignOut:), false, at);
+        insert_separator(app_menu, at);
         at += 1;
         insert_item(
             app_menu,
@@ -372,14 +365,44 @@ unsafe fn install_application_menu(target: *mut AnyObject) {
             crate::window_prefs::close_to_menu_bar(),
             at,
         );
+        at += 1;
+        insert_separator(app_menu, at);
+        at += 1;
+        if crate::biometric::available() {
+            insert_item(app_menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled(), at);
+            at += 1;
+        }
+        insert_item(
+            app_menu,
+            if crate::pin::enrolled() { "PIN" } else { "Set PIN" },
+            sel!(menuPin:),
+            crate::pin::enrolled(),
+            at,
+        );
+        at += 1;
+        insert_item(app_menu, "Change PIN", sel!(menuChangePin:), false, at);
+        at += 1;
+        insert_item(app_menu, "Change password", sel!(menuChangePassword:), false, at);
+        at += 1;
+        insert_separator(app_menu, at);
+        at += 1;
+        insert_item(app_menu, "Sign out", sel!(menuSignOut:), false, at);
+        at += 1;
+        insert_item(app_menu, "Delete account", sel!(menuDeleteAccount:), false, at);
+        at += 1;
+        insert_separator(app_menu, at);
     }
     if let Some(index) = find_action(app_menu, sel!(terminate:)) {
         let quit = item_at(app_menu, index);
         let _: () = msg_send![quit, setTarget: target];
         let _: () = msg_send![quit, setAction: sel!(menuQuit:)];
-    } else if !menu_has_action(app_menu, sel!(menuQuit:)) {
+        let _: () = msg_send![quit, setTitle: ns_string("Quit Drop")];
+    } else if let Some(index) = find_action(app_menu, sel!(menuQuit:)) {
+        let quit = item_at(app_menu, index);
+        let _: () = msg_send![quit, setTitle: ns_string("Quit Drop")];
+    } else {
         let index = item_count(app_menu);
-        insert_item(app_menu, "Quit", sel!(menuQuit:), false, index);
+        insert_item(app_menu, "Quit Drop", sel!(menuQuit:), false, index);
         let quit = item_at(app_menu, index);
         let _: () = msg_send![quit, setKeyEquivalent: ns_string("q")];
     }
@@ -391,15 +414,20 @@ unsafe fn install_dock_menu(target: *mut AnyObject) {
     let menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
     let menu: *mut AnyObject = msg_send![menu, init];
     add_item(menu, "Open", sel!(menuOpen:), false);
+    add_separator(menu);
+    add_item(menu, "Close to menu bar", sel!(menuCloseToMenuBar:), crate::window_prefs::close_to_menu_bar());
+    add_separator(menu);
     if crate::biometric::available() {
         add_item(menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled());
     }
     add_item(menu, if crate::pin::enrolled() { "PIN" } else { "Set PIN" }, sel!(menuPin:), crate::pin::enrolled());
     add_item(menu, "Change PIN", sel!(menuChangePin:), false);
     add_item(menu, "Change password", sel!(menuChangePassword:), false);
-    add_item(menu, "Delete account", sel!(menuDeleteAccount:), false);
+    add_separator(menu);
     add_item(menu, "Sign out", sel!(menuSignOut:), false);
-    add_item(menu, "Quit", sel!(menuQuit:), false);
+    add_item(menu, "Delete account", sel!(menuDeleteAccount:), false);
+    add_separator(menu);
+    add_item(menu, "Quit Drop", sel!(menuQuit:), false);
     let _: () = msg_send![menu, setDelegate: target];
     let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
     if !app.is_null() {
@@ -413,34 +441,24 @@ unsafe fn refresh_menu(menu: *mut AnyObject, app_menu: bool) {
         return;
     }
     if !menu_has_action(menu, sel!(menuTouchID:)) && crate::biometric::available() {
-        let at = find_action(menu, sel!(menuSignOut:))
-            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
-            .or_else(|| find_action(menu, sel!(menuQuit:)))
-            .or_else(|| find_action(menu, sel!(terminate:)))
+        let at = find_action(menu, sel!(menuPin:))
+            .or_else(|| find_action(menu, sel!(menuChangePin:)))
+            .or_else(|| find_action(menu, sel!(menuChangePassword:)))
             .unwrap_or_else(|| item_count(menu));
         insert_item(menu, "Touch ID", sel!(menuTouchID:), false, at);
     }
     if !menu_has_action(menu, sel!(menuPin:)) {
-        let at = find_action(menu, sel!(menuSignOut:))
-            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
-            .or_else(|| find_action(menu, sel!(menuQuit:)))
-            .or_else(|| find_action(menu, sel!(terminate:)))
+        let at = find_action(menu, sel!(menuChangePin:))
+            .or_else(|| find_action(menu, sel!(menuChangePassword:)))
             .unwrap_or_else(|| item_count(menu));
         insert_item(menu, if crate::pin::enrolled() { "PIN" } else { "Set PIN" }, sel!(menuPin:), crate::pin::enrolled(), at);
     }
     if !menu_has_action(menu, sel!(menuChangePin:)) {
-        let at = find_action(menu, sel!(menuChangePassword:))
-            .or_else(|| find_action(menu, sel!(menuSignOut:)))
-            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
-            .or_else(|| find_action(menu, sel!(menuQuit:)))
-            .or_else(|| find_action(menu, sel!(terminate:)))
-            .unwrap_or_else(|| item_count(menu));
+        let at = find_action(menu, sel!(menuChangePassword:)).unwrap_or_else(|| item_count(menu));
         insert_item(menu, "Change PIN", sel!(menuChangePin:), false, at);
     }
     if !menu_has_action(menu, sel!(menuChangePassword:)) {
-        let at = find_action(menu, sel!(menuDeleteAccount:))
-            .or_else(|| find_action(menu, sel!(menuSignOut:)))
-            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
+        let at = find_action(menu, sel!(menuSignOut:))
             .or_else(|| find_action(menu, sel!(menuQuit:)))
             .or_else(|| find_action(menu, sel!(terminate:)))
             .unwrap_or_else(|| item_count(menu));
@@ -448,16 +466,16 @@ unsafe fn refresh_menu(menu: *mut AnyObject, app_menu: bool) {
     }
     if !menu_has_action(menu, sel!(menuDeleteAccount:)) {
         let at = find_action(menu, sel!(menuSignOut:))
-            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
+            .map(|index| index + 1)
             .or_else(|| find_action(menu, sel!(menuQuit:)))
             .or_else(|| find_action(menu, sel!(terminate:)))
             .unwrap_or_else(|| item_count(menu));
         insert_item(menu, "Delete account", sel!(menuDeleteAccount:), false, at);
     }
     if app_menu && !menu_has_action(menu, sel!(menuCloseToMenuBar:)) {
-        let at = find_action(menu, sel!(menuQuit:))
-            .or_else(|| find_action(menu, sel!(terminate:)))
-            .unwrap_or_else(|| item_count(menu));
+        let at = find_action(menu, sel!(menuTouchID:))
+            .or_else(|| find_action(menu, sel!(menuPin:)))
+            .unwrap_or(0);
         insert_item(menu, "Close to menu bar", sel!(menuCloseToMenuBar:), crate::window_prefs::close_to_menu_bar(), at);
     }
     let touch_on = crate::biometric::enrolled();
@@ -564,6 +582,9 @@ extern "C" fn right_mouse_up(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObj
         let menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
         let menu: *mut AnyObject = msg_send![menu, init];
         add_item(menu, "Open", sel!(menuOpen:), false);
+        add_separator(menu);
+        add_item(menu, "Close to menu bar", sel!(menuCloseToMenuBar:), crate::window_prefs::close_to_menu_bar());
+        add_separator(menu);
         if crate::biometric::available() {
             add_item(menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled());
         }
@@ -572,9 +593,11 @@ extern "C" fn right_mouse_up(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObj
             add_item(menu, "Change PIN", sel!(menuChangePin:), false);
         }
         add_item(menu, "Change password", sel!(menuChangePassword:), false);
-        add_item(menu, "Delete account", sel!(menuDeleteAccount:), false);
+        add_separator(menu);
         add_item(menu, "Sign out", sel!(menuSignOut:), false);
-        add_item(menu, "Quit", sel!(menuQuit:), false);
+        add_item(menu, "Delete account", sel!(menuDeleteAccount:), false);
+        add_separator(menu);
+        add_item(menu, "Quit Drop", sel!(menuQuit:), false);
         let _: () = msg_send![class!(NSMenu), popUpContextMenu: menu withEvent: event forView: this];
     }
 }
@@ -582,6 +605,24 @@ extern "C" fn right_mouse_up(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObj
 unsafe fn add_item(menu: *mut AnyObject, title: &str, action: Sel, checked: bool) {
     let item = make_item(title, action, checked);
     let _: () = msg_send![menu, addItem: item];
+}
+
+unsafe fn add_separator(menu: *mut AnyObject) {
+    let item: *mut AnyObject = msg_send![class!(NSMenuItem), separatorItem];
+    let _: () = msg_send![menu, addItem: item];
+}
+
+unsafe fn insert_separator(menu: *mut AnyObject, index: isize) {
+    let item: *mut AnyObject = msg_send![class!(NSMenuItem), separatorItem];
+    let _: () = msg_send![menu, insertItem: item atIndex: index];
+}
+
+unsafe fn item_is_separator(item: *mut AnyObject) -> bool {
+    if item.is_null() {
+        return false;
+    }
+    let separator: Bool = msg_send![item, isSeparatorItem];
+    separator == Bool::YES
 }
 
 unsafe fn make_item(title: &str, action: Sel, checked: bool) -> *mut AnyObject {

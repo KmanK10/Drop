@@ -40,7 +40,6 @@ pub enum Command {
     ChangePassword {
         current: Zeroizing<String>,
         next: Zeroizing<String>,
-        pin: Zeroizing<String>,
     },
     DeleteAccount,
     UnlockPin {
@@ -210,15 +209,10 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
                     }
                 }
             }
-            Command::ChangePassword {
-                mut current,
-                mut next,
-                mut pin,
-            } => {
+            Command::ChangePassword { mut current, mut next } => {
                 let Some(active) = client.as_mut() else {
                     current.zeroize();
                     next.zeroize();
-                    pin.zeroize();
                     let _ = tx.send(WorkerEvent::Error("Sign in before changing the password.".into()));
                     continue;
                 };
@@ -226,14 +220,17 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
                     Ok(snapshot) => {
                         current.zeroize();
                         next.zeroize();
-                        let pin_kept = refresh_pin(active, pin.as_str());
-                        pin.zeroize();
+                        // A new password means a new content key. The old PIN wrap
+                        // cannot open it, and the screen does not ask for the PIN.
+                        let pin_kept = !crate::pin::enrolled();
+                        if !pin_kept {
+                            crate::pin::delete();
+                        }
                         let _ = tx.send(WorkerEvent::PasswordChanged { snapshot, pin_kept });
                     }
                     Err(error) => {
                         current.zeroize();
                         next.zeroize();
-                        pin.zeroize();
                         if matches!(error, DropError::SignedOut) {
                             let _ = tx.send(WorkerEvent::SignedOut);
                         } else {
@@ -421,39 +418,6 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
                 };
                 report(client.delete_item(&id), &tx);
             }
-        }
-    }
-}
-
-fn refresh_pin(client: &DropClient, pin: &str) -> bool {
-    if !crate::pin::enrolled() {
-        return true;
-    }
-    if drop_core::pin_rejection(pin, None).is_some() {
-        crate::pin::delete();
-        return false;
-    }
-    match crate::pin::open(pin) {
-        Ok(mut plain) => {
-            plain.zeroize();
-            let bytes = match client.unlock_material().and_then(|material| material.encode()) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    crate::pin::delete();
-                    return false;
-                }
-            };
-            match crate::pin::store(pin, &bytes) {
-                Ok(()) => true,
-                Err(_) => {
-                    crate::pin::delete();
-                    false
-                }
-            }
-        }
-        Err(_) => {
-            crate::pin::delete();
-            false
         }
     }
 }

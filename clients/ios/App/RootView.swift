@@ -667,6 +667,11 @@ private struct SettingsView: View {
                     field("Current password", text: $current)
                     field("New password", text: $next)
                     field("Confirm new password", text: $confirm)
+                    if model.pinOn {
+                        Text("Changing the password turns the PIN off.")
+                            .font(.footnote)
+                            .foregroundStyle(palette.muted)
+                    }
                     Button(model.settingsBusy.isEmpty ? "Save" : model.settingsBusy) {
                         model.changePassword(current: current, next: next, confirm: confirm)
                     }

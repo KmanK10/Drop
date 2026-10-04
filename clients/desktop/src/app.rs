@@ -154,6 +154,8 @@ struct DropApp {
     pin_changed_at: Option<Instant>,
     pin_epoch: u64,
     returning: bool,
+    /// Returning sign-in with a PIN shows the PIN until this is turned on.
+    use_password: bool,
     show_setup: bool,
     setup_server: String,
     setup_username: String,
@@ -220,6 +222,7 @@ impl DropApp {
             pin_changed_at: None,
             pin_epoch: 0,
             returning,
+            use_password: false,
             show_setup: false,
             setup_server: String::new(),
             setup_username: String::new(),
@@ -631,12 +634,11 @@ impl DropApp {
         }
         let current = Zeroizing::new(std::mem::take(&mut self.pw_current));
         let next = Zeroizing::new(std::mem::take(&mut self.pw_next));
-        let pin = Zeroizing::new(std::mem::take(&mut self.pin_current));
         self.pw_confirm.zeroize();
         self.pw_confirm.clear();
         self.busy = true;
         self.form_error.clear();
-        self.send(Command::ChangePassword { current, next, pin });
+        self.send(Command::ChangePassword { current, next });
     }
 
     fn unlock_with_pin(&mut self) {
@@ -667,7 +669,14 @@ impl DropApp {
     }
 
     fn poll_pin(&mut self) {
-        if self.account.is_some() || !self.returning || self.show_setup || !self.pin_on || self.busy || self.pin_entry == self.pin_attempted {
+        if self.account.is_some()
+            || !self.returning
+            || self.show_setup
+            || self.use_password
+            || !self.pin_on
+            || self.busy
+            || self.pin_entry == self.pin_attempted
+        {
             return;
         }
         if drop_core::pin_rejection(&self.pin_entry, None).is_some() {
@@ -711,6 +720,7 @@ impl DropApp {
 
     fn note_returning(&mut self) {
         self.returning = !self.server.trim().is_empty() && !self.username.trim().is_empty();
+        self.use_password = false;
     }
 
     fn submit_delete(&mut self) {
@@ -788,7 +798,11 @@ impl DropApp {
         let server = if self.show_setup { self.setup_server.trim() } else { self.server.trim() }.to_string();
         let username = if self.show_setup { self.setup_username.trim() } else { self.username.trim() }.to_string();
         if server.is_empty() || username.is_empty() || self.password.is_empty() {
-            self.error = "Enter the server, username, and password.".into();
+            self.error = if !self.show_setup && self.returning && !server.is_empty() && !username.is_empty() {
+                "Enter your password.".into()
+            } else {
+                "Enter the server, username, and password.".into()
+            };
             return;
         }
         self.server = server.clone();
@@ -856,11 +870,12 @@ impl DropApp {
                 .color(colors.muted)
                 .size(12.0),
             );
-        } else if self.pin_on {
+        } else if self.pin_on && !self.use_password {
             self.pin_field(ui);
             self.http_note(ui);
             notice(ui, &self.error, &self.status);
             self.biometric_button(ui);
+            self.use_password_button(ui);
             self.setup_button(ui);
         } else {
             self.password_field(ui);
@@ -869,6 +884,9 @@ impl DropApp {
             ui.add_space(8.0);
             self.sign_in_button(ui, &colors);
             self.biometric_button(ui);
+            if self.pin_on {
+                self.use_pin_button(ui);
+            }
             self.setup_button(ui);
         }
     }
@@ -882,7 +900,7 @@ impl DropApp {
                 .password(true)
                 .id(password_id)
                 .desired_width(f32::INFINITY)
-                .hint_text("Password"),
+                .hint_text(""),
         );
         if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
             self.submit_sign_in();
@@ -896,21 +914,16 @@ impl DropApp {
             TextEdit::singleline(&mut self.pin_entry)
                 .password(true)
                 .desired_width(f32::INFINITY)
-                .hint_text("4 to 8 digits"),
+                .hint_text(""),
         );
-        ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
         if response.changed() {
             self.pin_changed_at = Some(Instant::now());
             self.poll_pin();
         }
-        if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-            if let Some(problem) = drop_core::pin_rejection(&self.pin_entry, None) {
-                self.error = problem.into();
-            } else {
-                self.pin_attempted.clear();
-                self.pin_changed_at = Some(Instant::now() - Duration::from_secs(1));
-                self.poll_pin();
-            }
+        if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) && drop_core::pin_rejection(&self.pin_entry, None).is_none() {
+            self.pin_attempted.clear();
+            self.pin_changed_at = Some(Instant::now() - Duration::from_secs(1));
+            self.poll_pin();
         }
     }
 
@@ -935,14 +948,38 @@ impl DropApp {
         }
     }
 
+    fn use_password_button(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        if ui.add_enabled(!self.busy, Button::new("Use password")).clicked() {
+            self.pin_entry.clear();
+            self.pin_attempted.clear();
+            self.password.zeroize();
+            self.password.clear();
+            self.error.clear();
+            self.use_password = true;
+        }
+    }
+
+    fn use_pin_button(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        if ui.add_enabled(!self.busy, Button::new("Use PIN")).clicked() {
+            self.password.zeroize();
+            self.password.clear();
+            self.pin_entry.clear();
+            self.pin_attempted.clear();
+            self.error.clear();
+            self.use_password = false;
+        }
+    }
+
     fn setup_button(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(12.0);
         if ui.add_enabled(!self.busy, Button::new("Change server or account")).clicked() {
             self.setup_server = self.server.clone();
             self.setup_username = self.username.clone();
             self.password.zeroize();
             self.password.clear();
             self.pin_entry.clear();
+            self.pin_attempted.clear();
             self.error.clear();
             self.show_setup = true;
         }
@@ -1158,10 +1195,10 @@ impl DropApp {
         match self.form {
             AccountForm::SetPin | AccountForm::ChangePin => {
                 if self.form == AccountForm::ChangePin {
-                    secret_field(ui, "Current PIN", &mut self.pin_current, "Current PIN");
+                    secret_field(ui, "Current PIN", &mut self.pin_current, "");
                 }
                 secret_field(ui, "New PIN", &mut self.pin_new, "4 to 8 digits");
-                secret_field(ui, "Confirm PIN", &mut self.pin_confirm, "Confirm PIN");
+                secret_field(ui, "Confirm PIN", &mut self.pin_confirm, "");
                 ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
                 notice(ui, &self.form_error, "");
                 ui.horizontal(|ui| {
@@ -1175,11 +1212,15 @@ impl DropApp {
                 });
             }
             AccountForm::ChangePassword => {
-                secret_field(ui, "Current password", &mut self.pw_current, "Current password");
-                secret_field(ui, "New password", &mut self.pw_next, "New password");
-                secret_field(ui, "Confirm new password", &mut self.pw_confirm, "Confirm new password");
+                secret_field(ui, "Current password", &mut self.pw_current, "");
+                secret_field(ui, "New password", &mut self.pw_next, "");
+                secret_field(ui, "Confirm new password", &mut self.pw_confirm, "");
                 if self.pin_on {
-                    secret_field(ui, "Current PIN", &mut self.pin_current, "Current PIN");
+                    ui.label(
+                        RichText::new("Changing the password turns the PIN off.")
+                            .color(colors.muted)
+                            .size(12.0),
+                    );
                 }
                 notice(ui, &self.form_error, "");
                 ui.horizontal(|ui| {
@@ -1195,7 +1236,7 @@ impl DropApp {
             AccountForm::DeleteAccount => {
                 ui.label(RichText::new("Danger zone").strong().color(colors.danger));
                 ui.label(RichText::new("Type your username, then delete the account.").color(colors.muted).size(12.0));
-                labeled(ui, "Username", &mut self.delete_name, "Username");
+                labeled(ui, "Username", &mut self.delete_name, "");
                 notice(ui, &self.form_error, "");
                 ui.horizontal(|ui| {
                     let label = if self.busy { "Deleting…" } else { "Delete account" };
