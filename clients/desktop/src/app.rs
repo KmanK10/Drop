@@ -1164,7 +1164,7 @@ impl DropApp {
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.add_enabled_ui(!self.busy, |ui| {
-                                let trash = row_mark(ui, RowMark::Trash, colors.danger).on_hover_text("Delete");
+                                let trash = trash_mark(ui, colors.danger).on_hover_text("Delete");
                                 if trash.clicked() {
                                     self.busy = true;
                                     self.error.clear();
@@ -1552,29 +1552,33 @@ fn labeled(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
     ui.add(edit);
 }
 
-enum RowMark {
-    Trash,
-}
-
-/// A circled mark in the same family as the iPhone row buttons.
-fn row_mark(ui: &mut egui::Ui, mark: RowMark, ink: Color32) -> egui::Response {
+/// The iPhone row's delete control: an outline trash glyph in a circle, tinted
+/// with the danger color. One tap deletes.
+fn trash_mark(ui: &mut egui::Ui, ink: Color32) -> egui::Response {
     let size = 28.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
     if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let center = rect.center();
-        let stroke = Stroke::new(1.5_f32, ink);
-        painter.circle_stroke(center, size * 0.5 - 1.0, stroke);
-        match mark {
-            RowMark::Trash => {
-                painter.hline(center.x - 5.5..=center.x + 5.5, center.y - 4.0, stroke);
-                painter.hline(center.x - 2.0..=center.x + 2.0, center.y - 6.2, stroke);
-                let body = egui::Rect::from_center_size(center + Vec2::new(0.0, 2.2), Vec2::new(9.0, 8.0));
-                painter.rect_stroke(body, egui::Rounding::same(1.0), stroke);
-            }
-        }
+        let texture = trash_texture(ui.ctx());
+        ui.painter().image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            ink,
+        );
     }
     response
+}
+
+fn trash_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("drop-trash-mark");
+    if let Some(handle) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return handle;
+    }
+    let rgba = icon::trash_mark_rgba(64);
+    let image = egui::ColorImage::from_rgba_unmultiplied([64, 64], &rgba);
+    let handle = ctx.load_texture("drop-trash-mark", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
+    handle
 }
 
 /// The sign-in icon is the unlock control. It is not the menu checkmark,

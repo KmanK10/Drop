@@ -146,6 +146,79 @@ fn cover(distance: f32, aa: f32) -> f32 {
     (0.5 - distance / aa).clamp(0.0, 1.0)
 }
 
+/// The row delete mark: an outline trash glyph inside a circle.
+///
+/// Same arrangement as the iPhone row. White RGB with coverage in alpha, so
+/// the row tints it with the danger color. One tap on that control deletes.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub fn trash_mark_rgba(size: u32) -> Vec<u8> {
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    if size == 0 {
+        return rgba;
+    }
+    let aa = 0.8 / size as f32;
+    // Strokes are sized for a 28px control drawn from a 64px mask.
+    let circle_half = 1.7 / size as f32;
+    let stroke_half = 1.45 / size as f32;
+    // Lucide's trash-2, the simple trash glyph, scaled to sit inside the circle
+    // the way the iPhone SF Symbol sits in its circle.
+    let map = |x: f32, y: f32| -> (f32, f32) { (0.22 + x / 24.0 * 0.56, 0.20 + y / 24.0 * 0.60) };
+    let lid = [map(3.0, 6.0), map(21.0, 6.0)];
+    let handle = [map(8.0, 6.0), map(8.0, 4.2), map(10.0, 2.2), map(14.0, 2.2), map(16.0, 4.2), map(16.0, 6.0)];
+    let body = [map(5.0, 6.0), map(5.0, 19.0), map(7.0, 21.0), map(17.0, 21.0), map(19.0, 19.0), map(19.0, 6.0)];
+    let left_slot = [map(10.0, 11.0), map(10.0, 17.0)];
+    let right_slot = [map(14.0, 11.0), map(14.0, 17.0)];
+    for y in 0..size {
+        let py = (y as f32 + 0.5) / size as f32;
+        for x in 0..size {
+            let px = (x as f32 + 0.5) / size as f32;
+            let dx = px - 0.5;
+            let dy = py - 0.5;
+            let ring = ((dx * dx + dy * dy).sqrt() - 0.40).abs();
+            let mut mark = cover(ring - circle_half, aa);
+            mark = mark.max(stroke_coverage(px, py, &lid, stroke_half, aa));
+            mark = mark.max(stroke_coverage(px, py, &handle, stroke_half, aa));
+            mark = mark.max(stroke_coverage(px, py, &body, stroke_half, aa));
+            mark = mark.max(stroke_coverage(px, py, &left_slot, stroke_half, aa));
+            mark = mark.max(stroke_coverage(px, py, &right_slot, stroke_half, aa));
+            let alpha = (mark.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let index = ((y * size + x) * 4) as usize;
+            rgba[index] = 255;
+            rgba[index + 1] = 255;
+            rgba[index + 2] = 255;
+            rgba[index + 3] = alpha;
+        }
+    }
+    rgba
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn stroke_coverage(px: f32, py: f32, points: &[(f32, f32)], half: f32, aa: f32) -> f32 {
+    if points.len() < 2 {
+        return 0.0;
+    }
+    let mut nearest = f32::MAX;
+    for pair in points.windows(2) {
+        nearest = nearest.min(segment_distance(px, py, pair[0].0, pair[0].1, pair[1].0, pair[1].1));
+    }
+    cover(nearest - half, aa)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn segment_distance(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let abx = bx - ax;
+    let aby = by - ay;
+    let len2 = abx * abx + aby * aby;
+    let t = if len2 <= f32::EPSILON {
+        0.0
+    } else {
+        (((px - ax) * abx + (py - ay) * aby) / len2).clamp(0.0, 1.0)
+    };
+    let dx = px - (ax + abx * t);
+    let dy = py - (ay + aby * t);
+    (dx * dx + dy * dy).sqrt()
+}
+
 /// Signed distance to a rounded rectangle. Negative is inside, matching make-icon.py.
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn round_box(px: f32, py: f32, left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> f32 {

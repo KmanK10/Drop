@@ -1,38 +1,40 @@
-//! The window's menu bar, drawn on the title-bar row.
+//! The window's menu, drawn on the title-bar row.
 //!
-//! `SetMenu` on the main window would put the bar under the caption. This
-//! window is an owned popup that sits on the caption itself: after the icon,
-//! before minimize, maximize, and close. The icon, the caption buttons, and
-//! the taskbar icon stay the system's.
+//! A system menu bar stays a light rectangle on a dark caption. This window is
+//! an owned popup on the caption itself, after the icon and before minimize,
+//! maximize, and close. It is filled with the caption color and the word
+//! Options is drawn in the caption's text color. The dropdown is the system
+//! menu. The icon, the caption buttons, and the taskbar icon stay the system's.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use windows::core::{w, PCSTR, PCWSTR};
-use windows::Win32::Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWA_EXTENDED_FRAME_BOUNDS,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_BUTTON_BOUNDS,
+    DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
 };
 use windows::Win32::Graphics::Gdi::{
-    CreateFontIndirectW, DeleteObject, GetDC, GetTextExtentPoint32W, ReleaseDC, SelectObject, HDC,
+    BeginPaint, CreateFontIndirectW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetPixel,
+    GetTextExtentPoint32W, InvalidateRect, ReleaseDC, SelectObject, SetBkMode, SetTextColor, DT_LEFT, DT_NOPREFIX,
+    DT_SINGLELINE, DT_VCENTER, HDC, PAINTSTRUCT, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow, GetSystemMetricsForDpi};
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CallWindowProcW, CreateMenu, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DrawMenuBar,
-    DestroyWindow, EnumWindows, GetClassNameW, GetForegroundWindow, GetMenu, GetMenuItemRect, GetWindowRect,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, RegisterClassW,
-    RemoveMenu, SetForegroundWindow, SetMenu, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SystemParametersInfoW,
-    GWLP_WNDPROC, HMENU, IDC_ARROW, MF_BYPOSITION, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    SM_CXSMICON, SM_CXSIZE, SM_CYCAPTION, SM_CYMENU, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WM_COMMAND,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITMENULOOP, WM_INITMENUPOPUP, WM_MOVE, WM_NCACTIVATE,
-    WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE, WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    AppendMenuW, CallWindowProcW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
+    EnumWindows, GetClassNameW, GetClientRect, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, LoadCursorW, PostMessageW, RegisterClassW,
+    RemoveMenu, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu,
+    GWLP_WNDPROC, HMENU, IDC_ARROW, MF_BYPOSITION, MF_CHECKED, MF_SEPARATOR, MF_STRING, SM_CXSMICON, SM_CXSIZE,
+    SM_CYCAPTION, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
+    SW_SHOWNOACTIVATE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TPM_TOPALIGN, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_EXITMENULOOP, WM_INITMENUPOPUP, WM_LBUTTONDOWN,
+    WM_MOUSEMOVE, WM_MOVE, WM_NCACTIVATE, WM_NULL, WM_PAINT, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_SIZE,
+    WM_WINDOWPOSCHANGED, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use crate::options::{WindowsOption, WINDOW_MENU_LABEL};
@@ -47,6 +49,8 @@ const ID_DELETE: usize = 107;
 const ID_QUIT: usize = 108;
 
 const CLASS: &str = "DropMenuBar";
+const OPEN_MENU: u32 = 0x8001;
+const WM_MOUSELEAVE: u32 = 675;
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static INSTALLING: AtomicBool = AtomicBool::new(false);
@@ -56,14 +60,17 @@ static MENU: AtomicUsize = AtomicUsize::new(0);
 static POPUP: AtomicUsize = AtomicUsize::new(0);
 static PREV_PROC: AtomicUsize = AtomicUsize::new(0);
 static MENU_W: AtomicI32 = AtomicI32::new(0);
-static MENU_H: AtomicI32 = AtomicI32::new(0);
 static COVER_W: AtomicI32 = AtomicI32::new(0);
 static CACHED_DPI: AtomicU32 = AtomicU32::new(0);
-static SNAPPED: AtomicBool = AtomicBool::new(false);
 static LAST_X: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAST_Y: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAST_W: AtomicI32 = AtomicI32::new(0);
 static LAST_H: AtomicI32 = AtomicI32::new(0);
+static CAPTION_BG: AtomicU32 = AtomicU32::new(0);
+static CAPTION_INK: AtomicU32 = AtomicU32::new(0);
+static HOT: AtomicBool = AtomicBool::new(false);
+static OPEN: AtomicBool = AtomicBool::new(false);
+static LAST_CLOSE_MS: AtomicU64 = AtomicU64::new(0);
 
 static TX: Mutex<Option<mpsc::Sender<WindowsOption>>> = Mutex::new(None);
 static RX: Mutex<Option<mpsc::Receiver<WindowsOption>>> = Mutex::new(None);
@@ -127,33 +134,19 @@ unsafe fn install_inner(wake: Arc<dyn Fn() + Send + Sync>) -> bool {
     };
     RegisterClassW(&class);
 
-    let bar = match CreateMenu() {
+    let popup = match CreatePopupMenu() {
         Ok(menu) => menu,
         Err(_) => return false,
     };
-    let popup = match CreatePopupMenu() {
-        Ok(menu) => menu,
-        Err(_) => {
-            let _ = DestroyMenu(bar);
-            return false;
-        }
-    };
-    let label = wide(WINDOW_MENU_LABEL);
-    if AppendMenuW(bar, MF_POPUP | MF_STRING, popup.0 as usize, PCWSTR(label.as_ptr())).is_err() {
-        let _ = DestroyMenu(popup);
-        let _ = DestroyMenu(bar);
-        return false;
-    }
     fill_popup(popup);
     allow_dark_menus();
+    store_fallback_colors();
 
     let dpi = window_dpi(owner);
-    let (width, height, cover) = measure(dpi);
+    let (width, cover) = measure(dpi);
     MENU_W.store(width, Ordering::Relaxed);
-    MENU_H.store(height, Ordering::Relaxed);
     COVER_W.store(cover, Ordering::Relaxed);
     CACHED_DPI.store(dpi, Ordering::Relaxed);
-    SNAPPED.store(false, Ordering::Relaxed);
 
     let menu = match CreateWindowExW(
         WS_EX_TOOLWINDOW,
@@ -163,7 +156,7 @@ unsafe fn install_inner(wake: Arc<dyn Fn() + Send + Sync>) -> bool {
         0,
         0,
         width,
-        height,
+        8,
         owner,
         None,
         instance,
@@ -171,16 +164,10 @@ unsafe fn install_inner(wake: Arc<dyn Fn() + Send + Sync>) -> bool {
     ) {
         Ok(hwnd) => hwnd,
         Err(_) => {
-            let _ = DestroyMenu(bar);
+            let _ = DestroyMenu(popup);
             return false;
         }
     };
-    if SetMenu(menu, bar).is_err() {
-        let _ = DestroyWindow(menu);
-        let _ = DestroyMenu(bar);
-        return false;
-    }
-    let _ = DrawMenuBar(menu);
     let corner = DWMWCP_DONOTROUND;
     let _ = DwmSetWindowAttribute(
         menu,
@@ -197,6 +184,7 @@ unsafe fn install_inner(wake: Arc<dyn Fn() + Send + Sync>) -> bool {
     let prev = SetWindowLongPtrW(owner, GWLP_WNDPROC, owner_proc as *const () as usize as isize);
     if prev == 0 {
         let _ = DestroyWindow(menu);
+        let _ = DestroyMenu(popup);
         MENU.store(0, Ordering::Release);
         POPUP.store(0, Ordering::Release);
         OWNER.store(0, Ordering::Release);
@@ -239,28 +227,21 @@ unsafe fn place_inner() {
 
     let dpi = window_dpi(owner);
     if dpi != CACHED_DPI.swap(dpi, Ordering::Relaxed) {
-        let (width, height, cover) = measure(dpi);
+        let (width, cover) = measure(dpi);
         MENU_W.store(width, Ordering::Relaxed);
-        MENU_H.store(height, Ordering::Relaxed);
         COVER_W.store(cover, Ordering::Relaxed);
-        SNAPPED.store(false, Ordering::Relaxed);
     }
 
-    move_menu(owner, menu);
-    // The item width is only real once the bar has been shown.
-    snap_to_item(menu);
-    if !SNAPPED.load(Ordering::Relaxed) {
-        return;
-    }
-    move_menu(owner, menu);
-}
-
-unsafe fn move_menu(owner: HWND, menu: HWND) {
     let width = MENU_W.load(Ordering::Relaxed).max(1);
-    let height = MENU_H.load(Ordering::Relaxed).max(1);
-    let Some((x, y, w, h)) = caption_slot(owner, width, height) else {
+    let Some((x, y, w, h)) = caption_slot(owner, width) else {
         return;
     };
+    refresh_caption_color(owner, x, y, w, h);
+    move_menu(owner, menu, x, y, w, h);
+}
+
+unsafe fn move_menu(owner: HWND, menu: HWND, x: i32, y: i32, w: i32, h: i32) {
+    let _ = owner;
     let visible = IsWindowVisible(menu).as_bool();
     if visible
         && LAST_X.load(Ordering::Relaxed) == x
@@ -281,32 +262,7 @@ unsafe fn move_menu(owner: HWND, menu: HWND) {
     }
 }
 
-unsafe fn snap_to_item(menu: HWND) {
-    if SNAPPED.load(Ordering::Relaxed) {
-        return;
-    }
-    if !IsWindowVisible(menu).as_bool() {
-        return;
-    }
-    let bar = GetMenu(menu);
-    if bar.is_invalid() {
-        return;
-    }
-    let mut rect = RECT::default();
-    if GetMenuItemRect(menu, bar, 0, &mut rect).is_err() {
-        return;
-    }
-    let item = rect.right - rect.left;
-    if item <= 0 {
-        return;
-    }
-    let width = item.max(COVER_W.load(Ordering::Relaxed)).max(1);
-    MENU_W.store(width, Ordering::Relaxed);
-    SNAPPED.store(true, Ordering::Relaxed);
-    LAST_W.store(0, Ordering::Relaxed);
-}
-
-unsafe fn caption_slot(owner: HWND, menu_width: i32, menu_height: i32) -> Option<(i32, i32, i32, i32)> {
+unsafe fn caption_slot(owner: HWND, menu_width: i32) -> Option<(i32, i32, i32, i32)> {
     let mut window = RECT::default();
     GetWindowRect(owner, &mut window).ok()?;
     let mut visible = window;
@@ -329,11 +285,12 @@ unsafe fn caption_slot(owner: HWND, menu_width: i32, menu_height: i32) -> Option
     let (buttons_left, buttons_top, buttons_height) = if buttons_ok && buttons.right > buttons.left && buttons.bottom > buttons.top {
         (buttons.left, buttons.top, buttons.bottom - buttons.top)
     } else {
-        let caption = GetSystemMetricsForDpi(SM_CYCAPTION, dpi).max(menu_height);
+        let caption = GetSystemMetricsForDpi(SM_CYCAPTION, dpi).max(1);
         let button = GetSystemMetricsForDpi(SM_CXSIZE, dpi).max(16);
         let width = (window.right - window.left).max(button * 3);
         (width - button * 3, 0, caption)
     };
+    // Fill the caption row. A shorter bar reads as a button sitting on it.
     let bounds = crate::options::title_bar_menu_bounds(
         window.left,
         window.top,
@@ -343,7 +300,7 @@ unsafe fn caption_slot(owner: HWND, menu_width: i32, menu_height: i32) -> Option
         buttons_height,
         icon,
         menu_width,
-        menu_height,
+        buttons_height.max(1),
     );
     if bounds.2 <= 0 {
         return None;
@@ -351,21 +308,14 @@ unsafe fn caption_slot(owner: HWND, menu_width: i32, menu_height: i32) -> Option
     Some(bounds)
 }
 
-unsafe fn measure(dpi: u32) -> (i32, i32, i32) {
-    let mut bar = RECT { left: 0, top: 0, right: 10, bottom: 0 };
-    let fitted = AdjustWindowRectExForDpi(&mut bar, WS_POPUP, BOOL(1), WS_EX_TOOLWINDOW, dpi)
-        .ok()
-        .map(|_| bar.bottom - bar.top)
-        .filter(|height| *height > 0);
-    let height = fitted.unwrap_or_else(|| GetSystemMetricsForDpi(SM_CYMENU, dpi).max(1));
+unsafe fn measure(dpi: u32) -> (i32, i32) {
     let scale = |px: i32| px * dpi as i32 / 96;
     let fallback_item = scale(72);
     let fallback_cover = scale(36);
     let Some((item, cover)) = text_widths(dpi) else {
-        return (fallback_item, height, fallback_cover);
+        return (fallback_item, fallback_cover);
     };
-    let width = item.max(cover).max(1);
-    (width, height, cover.max(1))
+    (item.max(cover).max(1), cover.max(1))
 }
 
 unsafe fn text_widths(dpi: u32) -> Option<(i32, i32)> {
@@ -471,23 +421,290 @@ fn emit(command: WindowsOption) {
     }
 }
 
+unsafe fn refresh_caption_color(owner: HWND, menu_x: i32, menu_y: i32, menu_w: i32, menu_h: i32) {
+    let bg = sample_caption(owner, menu_x, menu_y, menu_w, menu_h).unwrap_or_else(|| CAPTION_BG.load(Ordering::Relaxed));
+    if bg == 0 && CAPTION_BG.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let active = caption_is_active(owner);
+    let ink = crate::options::title_bar_menu_ink(bg, active);
+    let changed = bg != CAPTION_BG.load(Ordering::Relaxed) || ink != CAPTION_INK.load(Ordering::Relaxed);
+    if changed {
+        CAPTION_BG.store(bg, Ordering::Relaxed);
+        CAPTION_INK.store(ink, Ordering::Relaxed);
+    }
+    let menu = hwnd_of(MENU.load(Ordering::Acquire));
+    if menu.is_invalid() {
+        return;
+    }
+    if changed {
+        let color = bg;
+        let _ = DwmSetWindowAttribute(menu, DWMWA_BORDER_COLOR, &color as *const u32 as *const _, 4);
+        invalidate(menu);
+    }
+}
+
+unsafe fn sample_caption(owner: HWND, menu_x: i32, menu_y: i32, menu_w: i32, menu_h: i32) -> Option<u32> {
+    let mut window = RECT::default();
+    GetWindowRect(owner, &mut window).ok()?;
+    let mut buttons = RECT::default();
+    if DwmGetWindowAttribute(
+        owner,
+        DWMWA_CAPTION_BUTTON_BOUNDS,
+        &mut buttons as *mut RECT as *mut _,
+        std::mem::size_of::<RECT>() as u32,
+    )
+    .is_err()
+    || buttons.right <= buttons.left
+    {
+        return None;
+    }
+    let y = window.top + buttons.top + (buttons.bottom - buttons.top) / 2;
+    let right = window.left + buttons.left - 8;
+    let menu_right = menu_x + menu_w;
+    let menu_bottom = menu_y + menu_h;
+    let dc = GetDC(None);
+    if dc.is_invalid() {
+        return None;
+    }
+    let mut found = [0u32; 4];
+    let mut count = 0usize;
+    for x in [right - 24, right - 12, right] {
+        if x <= menu_right + 4 && y >= menu_y && y < menu_bottom {
+            continue;
+        }
+        if x <= window.left || x >= window.right {
+            continue;
+        }
+        let color = GetPixel(dc, x, y);
+        if color.0 != u32::MAX {
+            found[count] = color.0;
+            count += 1;
+        }
+    }
+    let _ = ReleaseDC(None, dc);
+    if count == 0 {
+        return None;
+    }
+    let mut ranked = found[..count].to_vec();
+    ranked.sort_by_key(|color| {
+        let red = color & 0xff;
+        let green = (color >> 8) & 0xff;
+        let blue = (color >> 16) & 0xff;
+        red * 3 + green * 6 + blue
+    });
+    Some(ranked[ranked.len() / 2])
+}
+
+fn caption_is_active(owner: HWND) -> bool {
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground == owner {
+        return true;
+    }
+    let menu = hwnd_of(MENU.load(Ordering::Acquire));
+    !menu.is_invalid() && foreground == menu
+}
+
+fn store_fallback_colors() {
+    let bg = if apps_use_dark() { 0x0020_2020 } else { 0x00ff_ffff };
+    CAPTION_BG.store(bg, Ordering::Relaxed);
+    CAPTION_INK.store(crate::options::title_bar_menu_ink(bg, true), Ordering::Relaxed);
+}
+
+unsafe fn invalidate(hwnd: HWND) {
+    let _ = InvalidateRect(hwnd, None, BOOL(0));
+}
+
+unsafe fn open_menu(hwnd: HWND) {
+    if OPEN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let now = unix_ms();
+    let last = LAST_CLOSE_MS.load(Ordering::Relaxed);
+    if last != 0 && now.saturating_sub(last) < 250 {
+        OPEN.store(false, Ordering::Release);
+        return;
+    }
+    let popup_bits = POPUP.load(Ordering::Acquire);
+    if popup_bits == 0 {
+        OPEN.store(false, Ordering::Release);
+        return;
+    }
+    let popup = HMENU(popup_bits as *mut core::ffi::c_void);
+    fill_popup(popup);
+    allow_dark_menus();
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect).is_err() {
+        OPEN.store(false, Ordering::Release);
+        return;
+    }
+    invalidate(hwnd);
+    let _ = SetForegroundWindow(hwnd);
+    let picked = TrackPopupMenu(
+        popup,
+        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+        rect.left,
+        rect.bottom,
+        0,
+        hwnd,
+        None,
+    );
+    let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+    OPEN.store(false, Ordering::Release);
+    LAST_CLOSE_MS.store(unix_ms(), Ordering::Relaxed);
+    HOT.store(false, Ordering::Relaxed);
+    invalidate(hwnd);
+    if let Some(command) = option_from_id(picked.0 as usize) {
+        emit(command);
+    }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+unsafe fn fill_caption(hwnd: HWND, hdc: HDC) {
+    let mut rect = RECT::default();
+    if GetClientRect(hwnd, &mut rect).is_err() {
+        return;
+    }
+    let brush = CreateSolidBrush(COLORREF(CAPTION_BG.load(Ordering::Relaxed)));
+    if !brush.is_invalid() {
+        let _ = FillRect(hdc, &rect, brush);
+        let _ = DeleteObject(brush);
+    }
+}
+
+unsafe fn paint_menu(hwnd: HWND, hdc: HDC) {
+    let mut rect = RECT::default();
+    if GetClientRect(hwnd, &mut rect).is_err() || rect.right <= rect.left || rect.bottom <= rect.top {
+        return;
+    }
+    fill_caption(hwnd, hdc);
+    let bg = CAPTION_BG.load(Ordering::Relaxed);
+    let hot = HOT.load(Ordering::Relaxed) || OPEN.load(Ordering::Relaxed);
+    let dpi = window_dpi(hwnd);
+    let pad = (8 * dpi as i32 / 96).max(6);
+    if hot {
+        let hover = crate::options::title_bar_menu_hover(bg);
+        let wash = CreateSolidBrush(COLORREF(hover));
+        if !wash.is_invalid() {
+            let inset = ((rect.bottom - rect.top) / 5).max(1);
+            let hover_rect = RECT {
+                left: 1,
+                top: rect.top + inset,
+                right: (pad + text_pixel_width(hdc, dpi, WINDOW_MENU_LABEL).unwrap_or(rect.right) + pad).min(rect.right - 1),
+                bottom: rect.bottom - inset,
+            };
+            if hover_rect.right > hover_rect.left {
+                let _ = FillRect(hdc, &hover_rect, wash);
+            }
+            let _ = DeleteObject(wash);
+        }
+    }
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    let _ = SetTextColor(hdc, COLORREF(CAPTION_INK.load(Ordering::Relaxed)));
+    if let Some(font) = menu_font(dpi) {
+        let previous = SelectObject(hdc, font);
+        let mut chars = wide_chars(WINDOW_MENU_LABEL);
+        let mut text = rect;
+        text.left += pad;
+        text.right -= 2;
+        let _ = DrawTextW(hdc, &mut chars, &mut text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if !previous.is_invalid() {
+            SelectObject(hdc, previous);
+        }
+        let _ = DeleteObject(font);
+    }
+}
+
+unsafe fn text_pixel_width(dc: HDC, dpi: u32, text: &str) -> Option<i32> {
+    let font = menu_font(dpi)?;
+    let previous = SelectObject(dc, font);
+    let chars = wide_chars(text);
+    let mut size = SIZE::default();
+    let ok = GetTextExtentPoint32W(dc, &chars, &mut size).as_bool();
+    if !previous.is_invalid() {
+        SelectObject(dc, previous);
+    }
+    let _ = DeleteObject(font);
+    if ok && size.cx > 0 { Some(size.cx) } else { None }
+}
+
+unsafe fn menu_font(dpi: u32) -> Option<windows::Win32::Graphics::Gdi::HFONT> {
+    let mut metrics = windows::Win32::UI::WindowsAndMessaging::NONCLIENTMETRICSW::default();
+    metrics.cbSize = std::mem::size_of_val(&metrics) as u32;
+    SystemParametersInfoW(
+        SPI_GETNONCLIENTMETRICS,
+        metrics.cbSize,
+        Some(&mut metrics as *mut _ as *mut _),
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+    )
+    .ok()?;
+    let mut font = metrics.lfMenuFont;
+    // Grayscale edges. ClearType fringes if the sampled caption is a shade off.
+    font.lfQuality = windows::Win32::Graphics::Gdi::FONT_QUALITY(4);
+    let system = GetDpiForSystem().max(96);
+    if dpi != 0 && dpi != system && font.lfHeight != 0 {
+        font.lfHeight = font.lfHeight.saturating_mul(dpi as i32) / system as i32;
+    }
+    let created = CreateFontIndirectW(&font);
+    if created.is_invalid() { None } else { Some(created) }
+}
+
 unsafe extern "system" fn menu_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_ERASEBKGND => return LRESULT(1),
+        WM_ERASEBKGND => {
+            let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+            if !hdc.is_invalid() {
+                fill_caption(hwnd, hdc);
+            }
+            return LRESULT(1);
+        }
+        WM_PAINT => {
+            let mut paint = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut paint);
+            if !hdc.is_invalid() {
+                paint_menu(hwnd, hdc);
+            }
+            let _ = EndPaint(hwnd, &paint);
+            return LRESULT(0);
+        }
+        WM_MOUSEMOVE => {
+            if !HOT.swap(true, Ordering::AcqRel) {
+                let mut track = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut track);
+                invalidate(hwnd);
+            }
+            return LRESULT(0);
+        }
+        WM_MOUSELEAVE => {
+            HOT.store(false, Ordering::Relaxed);
+            invalidate(hwnd);
+            return LRESULT(0);
+        }
+        WM_LBUTTONDOWN => {
+            let _ = PostMessageW(hwnd, OPEN_MENU, WPARAM(0), LPARAM(0));
+            return LRESULT(0);
+        }
+        OPEN_MENU => {
+            open_menu(hwnd);
+            return LRESULT(0);
+        }
         WM_INITMENUPOPUP => {
             let opened = wparam.0 as *mut core::ffi::c_void;
             let popup = POPUP.load(Ordering::Acquire) as *mut core::ffi::c_void;
             if !popup.is_null() && opened == popup {
                 fill_popup(HMENU(popup));
             }
-        }
-        WM_COMMAND => {
-            if wparam.0 >> 16 == 0 {
-                if let Some(command) = option_from_id(wparam.0 & 0xffff) {
-                    emit(command);
-                }
-            }
-            return LRESULT(0);
         }
         WM_EXITMENULOOP => {
             // The menu had the foreground. Give it back to the main window
@@ -519,18 +736,22 @@ unsafe extern "system" fn owner_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
     match msg {
         WM_WINDOWPOSCHANGED | WM_MOVE | WM_SIZE | WM_SHOWWINDOW | WM_DPICHANGED => place(),
         WM_SETTINGCHANGE => {
+            allow_dark_menus();
             let menu = hwnd_of(MENU.load(Ordering::Acquire));
             if !menu.is_invalid() {
-                allow_dark_menus();
                 allow_dark_for_window(menu);
-                let _ = DrawMenuBar(menu);
+                store_fallback_colors();
+                place();
             }
         }
         WM_DESTROY => {
             let menu = hwnd_of(MENU.swap(0, Ordering::AcqRel));
-            POPUP.store(0, Ordering::Release);
+            let popup = HMENU(POPUP.swap(0, Ordering::AcqRel) as *mut core::ffi::c_void);
             OWNER.store(0, Ordering::Release);
             INSTALLED.store(false, Ordering::Release);
+            if !popup.is_invalid() {
+                let _ = DestroyMenu(popup);
+            }
             if !menu.is_invalid() && IsWindow(menu).as_bool() {
                 let _ = DestroyWindow(menu);
             }

@@ -117,6 +117,42 @@ pub fn title_bar_menu_bounds(
     (x, y, width, menu_height.max(1))
 }
 
+/// Menu text on a title-bar caption. `background` is a COLORREF, `0x00BBGGRR`.
+/// A dark caption gets light text. A light caption gets dark text.
+pub fn title_bar_menu_ink(background: u32, active: bool) -> u32 {
+    if bgr_luma(background) < 148 {
+        if active { 0x00ff_ffff } else { 0x00b4_b4b4 }
+    } else if active {
+        0x001c_1c1c
+    } else {
+        0x0066_6666
+    }
+}
+
+/// A slight wash for the open or hovered label. It stays near the caption
+/// color, so the label does not become a light button.
+pub fn title_bar_menu_hover(background: u32) -> u32 {
+    let luma = bgr_luma(background);
+    let mix = |channel: u32| -> u32 {
+        if luma < 148 {
+            channel + (255 - channel) * 18 / 100
+        } else {
+            channel * 90 / 100
+        }
+    };
+    let red = mix(background & 0xff);
+    let green = mix((background >> 8) & 0xff);
+    let blue = mix((background >> 16) & 0xff);
+    red | (green << 8) | (blue << 16)
+}
+
+fn bgr_luma(background: u32) -> u32 {
+    let red = background & 0xff;
+    let green = (background >> 8) & 0xff;
+    let blue = (background >> 16) & 0xff;
+    (red * 3 + green * 6 + blue) / 10
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +205,21 @@ mod tests {
         let (_, _, clamped, _) = title_bar_menu_bounds(10, 20, 18, 50, 0, 32, 16, 70, 22);
         assert!(clamped < 70);
         assert!(clamped > 0);
+        let (x, y, _, height) = title_bar_menu_bounds(10, 20, 18, 300, 0, 32, 16, 70, 32);
+        assert_eq!((x, y, height), (44, 20, 32), "a caption-tall menu fills that row");
+    }
+
+    #[test]
+    fn title_bar_menu_text_follows_the_caption() {
+        let dark = 0x0020_2020;
+        assert_eq!(title_bar_menu_ink(dark, true), 0x00ff_ffff);
+        assert_ne!(title_bar_menu_ink(dark, false), 0x00ff_ffff);
+        let light = title_bar_menu_ink(0x00ff_ffff, true);
+        assert!(light & 0xff < 40 && (light >> 8) & 0xff < 40, "dark text on a light caption {light:#x}");
+        let hover = title_bar_menu_hover(dark);
+        assert_ne!(hover, dark);
+        assert!(hover & 0xff < 0x70, "hover stays on the dark caption {hover:#x}");
+        assert!((hover >> 8) & 0xff < 0x70);
+        assert!((hover >> 16) & 0xff < 0x70);
     }
 }

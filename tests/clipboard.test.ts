@@ -279,6 +279,25 @@ describe("copyFileItem", () => {
     });
 
     expect(labels(file("shot.png", "image/png"))).toEqual(["Copy", "Download", "Delete"]);
+    const row = renderToStaticMarkup(
+      createElement(ItemCard, {
+        item: file("shot.png", "image/png"),
+        unlocked: true,
+        now,
+        ttlMs: 30 * 24 * 60 * 60 * 1000,
+        pendingDelete: false,
+        onAskDelete: () => {},
+        onDelete: () => {},
+      }) as ReactNode,
+    );
+    expect(row).toContain("justify-between");
+    const buttons = [...row.matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/g)].map((match) => match[0]);
+    expect(buttons).toHaveLength(3);
+    expect(buttons[2]).toContain(">Delete<");
+    expect(buttons[0]).toContain(">Copy<");
+    expect(buttons[1]).toContain(">Download<");
+    const actions = row.indexOf("justify-between");
+    expect(row.indexOf(">Delete<")).toBeGreaterThan(actions);
     expect(labels(file("notes.txt", "text/plain"))).toContain("Copy");
     expect(labels(file("picture.jpg", "image/jpeg"))).toContain("Copy");
     expect(labels(file("icon.svg", "image/svg+xml"))).toContain("Copy");

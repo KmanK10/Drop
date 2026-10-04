@@ -138,32 +138,34 @@ export function ItemCard({
         <p className="mt-3 text-sm text-destructive">This item couldn't be decrypted with the current password.</p>
       ) : null}
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        {plain?.kind === "text" ? (
-          <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={() => void copyText()}>
-            <Copy />
-            {copied ? "Copied" : "Copy"}
-          </Button>
-        ) : null}
-        {plain?.kind === "file" && canCopyFile(plain.mime) ? (
-          <Button size="sm" variant="outline" className="h-11 sm:h-9" disabled={copying} onClick={() => void copyFile()}>
-            <Copy />
-            {copied ? "Copied" : copying ? "Copying…" : "Copy"}
-          </Button>
-        ) : null}
-        {plain?.kind === "file" ? (
-          <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={download}>
-            <Download />
-            Download
-          </Button>
-        ) : null}
+      <div className="mt-4 flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap gap-2">
+          {plain?.kind === "text" ? (
+            <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={() => void copyText()}>
+              <Copy />
+              {copied ? "Copied" : "Copy"}
+            </Button>
+          ) : null}
+          {plain?.kind === "file" && canCopyFile(plain.mime) ? (
+            <Button size="sm" variant="outline" className="h-11 sm:h-9" disabled={copying} onClick={() => void copyFile()}>
+              <Copy />
+              {copied ? "Copied" : copying ? "Copying…" : "Copy"}
+            </Button>
+          ) : null}
+          {plain?.kind === "file" ? (
+            <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={download}>
+              <Download />
+              Download
+            </Button>
+          ) : null}
+        </div>
         {pendingDelete ? (
-          <Button size="sm" variant="destructive" className="h-11 sm:h-9" onClick={onDelete}>
+          <Button size="sm" variant="destructive" className="h-11 shrink-0 sm:h-9" onClick={onDelete}>
             <Trash2 />
             Delete forever
           </Button>
         ) : (
-          <Button size="sm" variant="ghost" className="h-11 sm:h-9" onClick={onAskDelete}>
+          <Button size="sm" variant="ghost" className="h-11 shrink-0 sm:h-9" onClick={onAskDelete}>
             <Trash2 />
             Delete
           </Button>

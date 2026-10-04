@@ -118,4 +118,21 @@ mod icon_tests {
         let center = pixel(size / 2, size / 2);
         assert_eq!(center.3, 255, "the tile is opaque inside the rounded square");
     }
+
+    #[test]
+    fn trash_mark_is_an_outline_glyph_in_a_circle() {
+        let size = 64u32;
+        let rgba = super::icon::trash_mark_rgba(size);
+        let pixel = |x: u32, y: u32| {
+            let index = ((y * size + x) * 4) as usize;
+            rgba[index + 3]
+        };
+        assert_eq!(pixel(0, 0), 0, "outside the circle");
+        assert!(pixel(6, 32) > 180, "circle stroke");
+        assert!(pixel(32, 22) > 180, "lid");
+        assert!(pixel(32, 16) > 180, "handle");
+        assert!(pixel(21, 32) > 120, "body side");
+        assert!(pixel(32, 32) < 40, "the can is an outline, not a filled blob");
+        assert!(pixel(32, 48) < 40, "open inside the circle, under the can");
+    }
 }
