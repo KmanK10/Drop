@@ -46,6 +46,7 @@ private struct SignInView: View {
     @State private var setupUsername = ""
     @State private var returning = false
     @State private var decided = false
+    @State private var usePassword = false
 
     private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
     private var setup: Bool { showSetup || !returning }
@@ -92,16 +93,14 @@ private struct SignInView: View {
                     Text("Accounts are invite-only. Ask the person who runs this Drop for a username. There is no public signup.")
                         .font(.footnote)
                         .foregroundStyle(palette.muted)
-                } else if model.pinOn {
+                } else if model.pinOn && !usePassword {
                     field("PIN", text: $model.pinEntry, secure: true, keyboard: .numberPad)
-                    Text("Use 4 to 8 digits.")
-                        .font(.footnote)
-                        .foregroundStyle(palette.muted)
                     httpNote
                     if !model.error.isEmpty {
                         Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
                     }
                     signInRow(pin: true)
+                    usePasswordButton
                     setupButton
                 } else {
                     field("Password", text: $model.password, secure: true)
@@ -125,7 +124,7 @@ private struct SignInView: View {
             model.offerBiometrics()
         }
         .onChange(of: model.pinEntry) { _, _ in
-            if returning && !showSetup && model.pinOn {
+            if returning && !showSetup && model.pinOn && !usePassword {
                 model.notePinEntry()
             }
         }
@@ -172,6 +171,17 @@ private struct SignInView: View {
         }
     }
 
+    private var usePasswordButton: some View {
+        Button("Use password") {
+            model.pinEntry = ""
+            model.password = ""
+            model.error = ""
+            usePassword = true
+        }
+        .disabled(model.busy)
+        .foregroundStyle(palette.ink)
+    }
+
     private var setupButton: some View {
         Button("Change server or account") {
             setupServer = model.server
@@ -206,7 +216,7 @@ private struct SignInView: View {
             Text(title).foregroundStyle(palette.ink)
             LineField(
                 text: text,
-                placeholder: placeholder ?? title,
+                placeholder: placeholder ?? "",
                 secure: secure,
                 ink: UIColor(palette.ink),
                 muted: UIColor(palette.muted),
@@ -533,9 +543,6 @@ private struct ItemCard: View {
                         .disabled(model.busy)
                 }
                 Menu {
-                    if item.canCopy {
-                        Button("Copy") { model.copy(item) }
-                    }
                     Button("Share") { model.download(item) }
                     Button("Download") { model.saveFile(item) }
                 } label: {
@@ -729,7 +736,7 @@ private struct SettingsView: View {
             Text(title).foregroundStyle(palette.ink)
             LineField(
                 text: text,
-                placeholder: title,
+                placeholder: "",
                 secure: secure,
                 ink: UIColor(palette.ink),
                 muted: UIColor(palette.muted),
