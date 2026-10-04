@@ -78,6 +78,10 @@ The Xcode project is `clients/ios/Drop.xcodeproj`. It is an iPhone app plus a sh
 
 The app keeps the content key in memory and the session cookie in an ephemeral `URLSession`. Neither goes into the Keychain. The password field does not use a username or password content type, so iOS is not asked to store the password.
 
+The screen follows the system appearance, with the same cream and dark colors as the website. Typed text uses those colors, so it stays readable in light and dark. A tap outside a text field resigns the keyboard. There is no dismiss button in the window.
+
+The home-screen icon is the same clipboard as the Mac app, including the light plate and the dark plate. `desktop/make-icon.py` writes both 1024 pictures into `ios/App/Assets.xcassets/AppIcon.appiconset`. The dark picture is the `luminosity: dark` appearance. iOS masks the square.
+
 Add items from the share sheet or with Paste. The share extension only copies the file into the app-group inbox (`group.com.kiefermenard.drop`) and opens `dropclipboard://inbox`. It does not have the content key and does not upload. The running app encrypts the file and then deletes the inbox copy. If Drop was not signed in, the file waits in the inbox until you sign in.
 
 iOS cannot drop a file on the Dynamic Island. This app does not try. A Live Activity is not included.

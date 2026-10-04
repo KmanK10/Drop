@@ -15,6 +15,9 @@ Two documents carry that pair, because current actool does not keep a
 
 package-mac.sh compiles both. The bundle names the icon with CFBundleIconName
 and does not set CFBundleIconFile.
+
+The iPhone home-screen icon is the same 1024 drawing: AppIcon.png and
+AppIcon-dark.png, the dark one marked luminosity dark. iOS masks the square.
 """
 
 import json
@@ -319,10 +322,70 @@ def check_sources(here):
         raise SystemExit("package-mac.sh must pass --app-icon AppIcon")
     if "plutil -insert CFBundleIconFile" in script or "plutil -replace CFBundleIconFile" in script:
         raise SystemExit("package-mac.sh must not install CFBundleIconFile")
+    check_phone(here)
     print(
         f"icon sources ok: {light_count} light, {dark_count} dark, "
         f"light plate luminance {luminance(LIGHT_PLATE):.1f}, dark plate luminance {luminance(DARK_PLATE):.1f}"
     )
+
+
+def check_phone(here):
+    """The iPhone 1024 icons are the Mac 1024 clipboard, light and dark."""
+    phone = here.parent / "ios" / "App" / "Assets.xcassets" / "AppIcon.appiconset"
+    mac = here / "Assets.xcassets" / "AppIcon.appiconset"
+    contents = json.loads((phone / "Contents.json").read_text())
+    images = contents["images"]
+    if len(images) != 2:
+        raise SystemExit(f"iPhone icon expected 2 slots, found {len(images)}")
+    expected = {False: "AppIcon.png", True: "AppIcon-dark.png"}
+    mac_name = {False: "icon_512x512@2x.png", True: "icon_512x512@2x-dark.png"}
+    seen = set()
+    for entry in images:
+        appearances = entry.get("appearances", [])
+        dark = any(
+            item.get("appearance") == "luminosity" and item.get("value") == "dark" for item in appearances
+        )
+        if appearances and not dark:
+            raise SystemExit(f"unexpected appearance on iPhone {entry.get('filename')}")
+        if entry.get("idiom") != "universal" or entry.get("platform") != "ios" or entry.get("size") != "1024x1024":
+            raise SystemExit(f"iPhone icon slot is not a 1024 universal ios image: {entry}")
+        if entry.get("filename") != expected[dark]:
+            raise SystemExit(f"iPhone icon filename is {entry.get('filename')}")
+        seen.add(dark)
+        size, rgba = read_png(phone / entry["filename"])
+        if size != 1024:
+            raise SystemExit(f"{entry['filename']} is {size}px, expected 1024")
+        check(size, rgba, dark)
+        mac_size, mac_rgba = read_png(mac / mac_name[dark])
+        if mac_size != 1024 or rgba != mac_rgba:
+            raise SystemExit(f"iPhone {entry['filename']} does not match the Mac {mac_name[dark]} clipboard")
+    if seen != {False, True}:
+        raise SystemExit("iPhone icon is missing the light or dark clipboard")
+
+
+def write_phone_icon(here, cache):
+    iconset = here.parent / "ios" / "App" / "Assets.xcassets" / "AppIcon.appiconset"
+    iconset.mkdir(parents=True, exist_ok=True)
+    written = set()
+    images = []
+    for dark, filename in ((False, "AppIcon.png"), (True, "AppIcon-dark.png")):
+        rgba = cache[(1024, dark)]
+        (iconset / filename).write_bytes(png(1024, rgba))
+        written.add(filename)
+        entry = {
+            "filename": filename,
+            "idiom": "universal",
+            "platform": "ios",
+            "size": "1024x1024",
+        }
+        if dark:
+            entry["appearances"] = [{"appearance": "luminosity", "value": "dark"}]
+        images.append(entry)
+    for stale in iconset.glob("*.png"):
+        if stale.name not in written:
+            stale.unlink()
+    contents = {"images": images, "info": {"author": "xcode", "version": 1}}
+    (iconset / "Contents.json").write_text(json.dumps(contents, indent=2) + "\n")
 
 
 def main():
@@ -379,8 +442,10 @@ def main():
         if stale.name != "mark.png":
             stale.unlink()
     (icon_root / "icon.json").write_text(json.dumps(icon_document(), indent=2) + "\n")
+    write_phone_icon(here, cache)
     check_sources(here)
-    print(f"wrote {iconset} ({len(images)} images) and {icon_root}")
+    phone = here.parent / "ios" / "App" / "Assets.xcassets" / "AppIcon.appiconset"
+    print(f"wrote {iconset} ({len(images)} images), {icon_root}, and {phone}")
 
 
 if __name__ == "__main__":
