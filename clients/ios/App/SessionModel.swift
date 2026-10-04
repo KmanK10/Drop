@@ -21,6 +21,7 @@ final class SessionModel: ObservableObject {
     @Published var biometricsOn = false
     @Published var biometryAvailable = false
     @Published var biometryLabel = "Unlock with Face ID"
+    @Published var biometrySymbol = "faceid"
     @Published var pinOn = false
     @Published var pinEntry = ""
     @Published var formDone = 0
@@ -46,6 +47,7 @@ final class SessionModel: ObservableObject {
         let kind = BiometricStore.kind()
         biometryAvailable = kind != .none
         biometryLabel = kind.label
+        biometrySymbol = kind.symbolName
         biometricsOn = BiometricStore.enrolled()
         pinOn = PinStore.enrolled()
     }
@@ -438,6 +440,21 @@ final class SessionModel: ObservableObject {
             PinStore.delete()
             pinOn = false
         }
+    }
+
+    func submitPin() {
+        let pin = pinEntry.trimmingCharacters(in: .whitespacesAndNewlines)
+        if pin.isEmpty {
+            error = "Enter your PIN."
+            return
+        }
+        if let problem = DropPin.rejection(pin, confirm: nil) {
+            error = problem
+            return
+        }
+        pinWait?.cancel()
+        pinUnlockTicket += 1
+        startPinUnlock(pin, ticket: pinUnlockTicket)
     }
 
     func notePinEntry() {

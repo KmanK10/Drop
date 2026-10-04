@@ -101,7 +101,7 @@ private struct SignInView: View {
                     if !model.error.isEmpty {
                         Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
                     }
-                    biometricButton
+                    signInRow(pin: true)
                     setupButton
                 } else {
                     field("Password", text: $model.password, secure: true)
@@ -109,12 +109,7 @@ private struct SignInView: View {
                     if !model.error.isEmpty {
                         Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
                     }
-                    Button(model.status == "Signing in…" ? "Signing in…" : "Sign in") {
-                        model.signIn()
-                    }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(model.busy)
-                    biometricButton
+                    signInRow(pin: false)
                     setupButton
                 }
             }
@@ -146,14 +141,34 @@ private struct SignInView: View {
         }
     }
 
-    @ViewBuilder
-    private var biometricButton: some View {
-        if model.biometricsOn {
-            Button(model.status == "Unlocking…" ? "Unlocking…" : model.biometryLabel) {
-                model.unlockWithBiometrics()
+    private func signInRow(pin: Bool) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button(model.status == "Signing in…" ? "Signing in…" : "Sign in") {
+                if pin {
+                    model.submitPin()
+                } else if model.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    model.error = "Enter your password."
+                } else {
+                    model.signIn()
+                }
             }
             .buttonStyle(PrimaryButtonStyle())
             .disabled(model.busy)
+            Spacer(minLength: 8)
+            if model.biometricsOn {
+                Button {
+                    model.unlockWithBiometrics()
+                } label: {
+                    Image(systemName: model.biometrySymbol)
+                        .font(.system(size: 28))
+                        .foregroundStyle(palette.ink)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                        .accessibilityLabel(model.biometryLabel)
+                }
+                .buttonStyle(.plain)
+                .disabled(model.busy)
+            }
         }
     }
 
