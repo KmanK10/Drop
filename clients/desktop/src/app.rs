@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use drop_core::{
     format_bytes, load_settings, retention_label, save_settings, Account, CopyPayload, ItemSummary, Settings,
@@ -18,6 +18,14 @@ use crate::tray::{TrayAction, TrayPorts};
 use crate::worker::{self, Command, WorkerEvent};
 
 const SERVER_HINT: &str = "https://drop.example";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccountForm {
+    None,
+    SetPin,
+    ChangePin,
+    ChangePassword,
+}
 
 /// Same colors as the website. Light stays the cream palette. Dark follows
 /// `prefers-color-scheme` through the system theme egui already reports.
@@ -137,11 +145,18 @@ struct DropApp {
     refresh_biometrics: bool,
     biometric_epoch: u64,
     pin_on: bool,
-    pin_setup: bool,
     pin_new: String,
     pin_confirm: String,
+    pin_current: String,
     pin_entry: String,
+    pin_attempted: String,
+    pin_changed_at: Option<Instant>,
     pin_epoch: u64,
+    form: AccountForm,
+    form_error: String,
+    pw_current: String,
+    pw_next: String,
+    pw_confirm: String,
     tx: Sender<Command>,
     ui_tx: Sender<WorkerEvent>,
     rx: Receiver<WorkerEvent>,
@@ -190,11 +205,18 @@ impl DropApp {
             refresh_biometrics: false,
             biometric_epoch: 0,
             pin_on: pin::enrolled(),
-            pin_setup: false,
             pin_new: String::new(),
             pin_confirm: String::new(),
+            pin_current: String::new(),
             pin_entry: String::new(),
+            pin_attempted: String::new(),
+            pin_changed_at: None,
             pin_epoch: 0,
+            form: AccountForm::None,
+            form_error: String::new(),
+            pw_current: String::new(),
+            pw_next: String::new(),
+            pw_confirm: String::new(),
             tx,
             ui_tx,
             rx,
@@ -263,11 +285,13 @@ impl DropApp {
             }
             TrayAction::SetPin(enabled) => {
                 if enabled {
-                    self.begin_pin(ctx);
+                    self.open_form(ctx, AccountForm::SetPin);
                 } else {
                     self.clear_pin();
                 }
             }
+            TrayAction::ChangePin => self.open_form(ctx, AccountForm::ChangePin),
+            TrayAction::ChangePassword => self.open_form(ctx, AccountForm::ChangePassword),
             TrayAction::Dropped(paths) => {
                 show_window(ctx);
                 if self.account.is_none() {
@@ -288,6 +312,9 @@ impl DropApp {
                 self.http = snapshot.http;
                 self.account = Some(snapshot.account);
                 self.items = snapshot.items;
+                self.pin_entry.zeroize();
+                self.pin_entry.clear();
+                self.pin_attempted.clear();
                 self.busy = false;
                 self.error.clear();
                 self.update_tooltip();
@@ -311,10 +338,14 @@ impl DropApp {
             WorkerEvent::Error(error) => {
                 self.refresh_biometrics = false;
                 self.biometrics = biometric::enrolled();
-                self.error = error;
                 self.busy = false;
                 self.status.clear();
-                show_window(ctx);
+                if self.form == AccountForm::None {
+                    self.error = error;
+                    show_window(ctx);
+                } else {
+                    self.form_error = error;
+                }
             }
             WorkerEvent::BiometricMaterial(bytes) => {
                 self.status = format!("{}…", biometric::label());
@@ -383,28 +414,58 @@ impl DropApp {
                     pin::delete();
                     if epoch == self.pin_epoch {
                         self.pin_on = false;
-                        self.pin_setup = false;
+                        self.form = AccountForm::None;
                         self.busy = false;
                     }
                     return;
                 }
                 self.pin_on = true;
-                self.pin_setup = false;
+                self.form = AccountForm::None;
+                self.clear_form_fields();
                 self.busy = false;
                 self.status.clear();
+                self.form_error.clear();
             }
             WorkerEvent::PinRejected => {
-                self.error = "That PIN is wrong.".into();
                 self.busy = false;
                 self.status.clear();
-                show_window(ctx);
+                if self.form == AccountForm::None {
+                    self.error = "That PIN is wrong.".into();
+                } else {
+                    self.form_error = "That PIN is wrong.".into();
+                }
             }
             WorkerEvent::PinFailed { message } => {
                 self.pin_on = pin::enrolled();
-                self.error = message;
                 self.busy = false;
                 self.status.clear();
-                show_window(ctx);
+                if self.form == AccountForm::None {
+                    self.error = message;
+                    show_window(ctx);
+                } else {
+                    self.form_error = message;
+                }
+            }
+            WorkerEvent::PasswordChanged { snapshot, pin_kept } => {
+                self.http = snapshot.http;
+                self.account = Some(snapshot.account);
+                self.items = snapshot.items;
+                self.pin_on = pin::enrolled();
+                self.form = AccountForm::None;
+                self.clear_form_fields();
+                self.form_error.clear();
+                self.error.clear();
+                self.busy = false;
+                self.status = if pin_kept {
+                    "Password changed.".into()
+                } else {
+                    "Password changed. PIN is off.".into()
+                };
+                self.update_tooltip();
+                if biometric::enrolled() {
+                    self.busy = true;
+                    self.send(Command::PrepareBiometric);
+                }
             }
             WorkerEvent::Download(mut file) => {
                 self.busy = false;
@@ -449,25 +510,58 @@ impl DropApp {
         }
     }
 
-    fn begin_pin(&mut self, ctx: &Context) {
-        show_window(ctx);
+    fn open_form(&mut self, ctx: &Context, form: AccountForm) {
         if self.account.is_none() {
-            self.error = "Sign in with your password before turning this on.".into();
+            show_window(ctx);
+            self.error = match form {
+                AccountForm::ChangePassword => "Sign in before changing the password.".into(),
+                _ => "Sign in with your password before turning this on.".into(),
+            };
             return;
         }
-        self.pin_setup = true;
-        self.error.clear();
+        if form == AccountForm::ChangePin && !self.pin_on {
+            self.open_form(ctx, AccountForm::SetPin);
+            return;
+        }
+        self.form = form;
+        self.form_error.clear();
+        self.clear_form_fields();
+    }
+
+    fn close_form(&mut self) {
+        self.form = AccountForm::None;
+        self.form_error.clear();
+        self.clear_form_fields();
+    }
+
+    fn clear_form_fields(&mut self) {
+        self.pin_new.zeroize();
+        self.pin_new.clear();
+        self.pin_confirm.zeroize();
+        self.pin_confirm.clear();
+        self.pin_current.zeroize();
+        self.pin_current.clear();
+        self.pw_current.zeroize();
+        self.pw_current.clear();
+        self.pw_next.zeroize();
+        self.pw_next.clear();
+        self.pw_confirm.zeroize();
+        self.pw_confirm.clear();
     }
 
     fn clear_pin(&mut self) {
         self.pin_epoch = self.pin_epoch.wrapping_add(1);
         pin::delete();
         self.pin_on = false;
-        self.pin_setup = false;
+        if self.form == AccountForm::SetPin || self.form == AccountForm::ChangePin {
+            self.form = AccountForm::None;
+        }
         self.pin_new.zeroize();
         self.pin_new.clear();
         self.pin_confirm.zeroize();
         self.pin_confirm.clear();
+        self.pin_current.zeroize();
+        self.pin_current.clear();
     }
 
     fn save_pin(&mut self) {
@@ -475,22 +569,60 @@ impl DropApp {
             return;
         }
         if let Some(problem) = drop_core::pin_rejection(&self.pin_new, Some(&self.pin_confirm)) {
-            self.error = problem.into();
+            self.form_error = problem.into();
+            return;
+        }
+        self.pin_epoch = self.pin_epoch.wrapping_add(1);
+        let epoch = self.pin_epoch;
+        self.busy = true;
+        self.form_error.clear();
+        if self.form == AccountForm::ChangePin {
+            if let Some(problem) = drop_core::pin_rejection(&self.pin_current, None) {
+                self.busy = false;
+                self.form_error = problem.into();
+                return;
+            }
+            let current = Zeroizing::new(std::mem::take(&mut self.pin_current));
+            let new_pin = Zeroizing::new(std::mem::take(&mut self.pin_new));
+            self.pin_confirm.zeroize();
+            self.pin_confirm.clear();
+            self.send(Command::ChangePin {
+                current,
+                new_pin,
+                epoch,
+            });
             return;
         }
         let pin = Zeroizing::new(std::mem::take(&mut self.pin_new));
         self.pin_confirm.zeroize();
         self.pin_confirm.clear();
-        self.pin_epoch = self.pin_epoch.wrapping_add(1);
-        let epoch = self.pin_epoch;
-        self.busy = true;
-        self.error.clear();
-        self.status = "Saving PIN…".into();
         self.send(Command::StorePin { pin, epoch });
     }
 
-    fn unlock_with_pin(&mut self) {
+    fn save_password(&mut self) {
         if self.busy {
+            return;
+        }
+        if self.pw_current.is_empty() {
+            self.form_error = "Enter your current password.".into();
+            return;
+        }
+        if let Some(problem) = drop_core::password_rejection(&self.pw_next, Some(&self.pw_confirm)) {
+            self.form_error = problem.into();
+            return;
+        }
+        let current = Zeroizing::new(std::mem::take(&mut self.pw_current));
+        let next = Zeroizing::new(std::mem::take(&mut self.pw_next));
+        let pin = Zeroizing::new(std::mem::take(&mut self.pin_current));
+        self.pw_confirm.zeroize();
+        self.pw_confirm.clear();
+        self.busy = true;
+        self.form_error.clear();
+        self.send(Command::ChangePassword { current, next, pin });
+    }
+
+    fn unlock_with_pin(&mut self) {
+        if self.busy || self.account.is_some() {
             return;
         }
         if let Some(problem) = drop_core::pin_rejection(&self.pin_entry, None) {
@@ -500,10 +632,11 @@ impl DropApp {
         let server = self.server.trim().to_string();
         let username = self.username.trim().to_string();
         if server.is_empty() || username.is_empty() {
-            self.error = "Enter the server, username, and password.".into();
+            self.error = "Enter the server and username.".into();
             return;
         }
-        let pin = Zeroizing::new(std::mem::take(&mut self.pin_entry));
+        let pin = Zeroizing::new(self.pin_entry.clone());
+        self.pin_attempted = self.pin_entry.clone();
         self.busy = true;
         self.error.clear();
         self.status = "Unlocking…".into();
@@ -515,11 +648,26 @@ impl DropApp {
         });
     }
 
+    fn poll_pin(&mut self) {
+        if self.account.is_some() || !self.pin_on || self.busy || self.pin_entry == self.pin_attempted {
+            return;
+        }
+        if drop_core::pin_rejection(&self.pin_entry, None).is_some() {
+            return;
+        }
+        let immediate = self.pin_entry.chars().count() >= 8;
+        let waited = self.pin_changed_at.is_some_and(|then| then.elapsed() >= Duration::from_millis(350));
+        if immediate || waited {
+            self.unlock_with_pin();
+        }
+    }
+
     fn sign_out(&mut self) {
         self.biometric_epoch = self.biometric_epoch.wrapping_add(1);
         biometric::delete();
         self.biometrics = false;
         self.refresh_biometrics = false;
+        self.close_form();
         self.clear_pin();
         self.busy = true;
         self.send(Command::SignOut);
@@ -659,15 +807,25 @@ impl DropApp {
         if self.pin_on {
             ui.add_space(8.0);
             ui.label(RichText::new("PIN").color(colors.ink));
-            ui.add(
+            let response = ui.add(
                 TextEdit::singleline(&mut self.pin_entry)
                     .password(true)
                     .desired_width(f32::INFINITY)
-                    .hint_text("PIN"),
+                    .hint_text("4 to 8 digits"),
             );
             ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
-            if ui.add_enabled(!self.busy, Button::new("Unlock with PIN")).clicked() {
-                self.unlock_with_pin();
+            if response.changed() {
+                self.pin_changed_at = Some(Instant::now());
+                self.poll_pin();
+            }
+            if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                if let Some(problem) = drop_core::pin_rejection(&self.pin_entry, None) {
+                    self.error = problem.into();
+                } else {
+                    self.pin_attempted.clear();
+                    self.pin_changed_at = Some(Instant::now() - Duration::from_secs(1));
+                    self.poll_pin();
+                }
             }
         }
         ui.add_space(12.0);
@@ -706,37 +864,6 @@ impl DropApp {
                     .color(colors.muted)
                     .size(12.0),
             );
-        }
-        if self.pin_setup {
-            ui.add_space(8.0);
-            ui.label(RichText::new("PIN").color(colors.ink));
-            ui.add(
-                TextEdit::singleline(&mut self.pin_new)
-                    .password(true)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("PIN"),
-            );
-            ui.label(RichText::new("Confirm PIN").color(colors.ink));
-            ui.add(
-                TextEdit::singleline(&mut self.pin_confirm)
-                    .password(true)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("Confirm PIN"),
-            );
-            ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!self.busy, primary_button("Save PIN", &colors)).clicked() {
-                    self.save_pin();
-                }
-                if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
-                    self.pin_setup = false;
-                    self.pin_new.zeroize();
-                    self.pin_new.clear();
-                    self.pin_confirm.zeroize();
-                    self.pin_confirm.clear();
-                    self.pin_on = pin::enrolled();
-                }
-            });
         }
         ui.add_space(8.0);
         ui.add(
@@ -865,11 +992,95 @@ impl DropApp {
     }
 }
 
+impl DropApp {
+    fn show_account_form(&mut self, ctx: &Context) {
+        if self.form == AccountForm::None {
+            return;
+        }
+        let title = match self.form {
+            AccountForm::SetPin => "Set PIN",
+            AccountForm::ChangePin => "Change PIN",
+            AccountForm::ChangePassword => "Change password",
+            AccountForm::None => "Drop",
+        };
+        let builder = egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size([400.0, 460.0])
+            .with_min_inner_size([360.0, 280.0])
+            .with_resizable(false);
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("drop-account-form"),
+            builder,
+            |ui_ctx, class| {
+                if class != egui::ViewportClass::Embedded && ui_ctx.input(|input| input.viewport().close_requested()) {
+                    self.close_form();
+                    ui_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    return;
+                }
+                let body = |ui: &mut egui::Ui| self.account_form_ui(ui);
+                if class == egui::ViewportClass::Embedded {
+                    egui::Window::new(title)
+                        .collapsible(false)
+                        .resizable(false)
+                        .show(ui_ctx, body);
+                } else {
+                    CentralPanel::default().show(ui_ctx, body);
+                }
+            },
+        );
+    }
+
+    fn account_form_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = colors(ui);
+        match self.form {
+            AccountForm::SetPin | AccountForm::ChangePin => {
+                if self.form == AccountForm::ChangePin {
+                    secret_field(ui, "Current PIN", &mut self.pin_current, "Current PIN");
+                }
+                secret_field(ui, "New PIN", &mut self.pin_new, "4 to 8 digits");
+                secret_field(ui, "Confirm PIN", &mut self.pin_confirm, "Confirm PIN");
+                ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
+                notice(ui, &self.form_error, "");
+                ui.horizontal(|ui| {
+                    let label = if self.busy { "Saving…" } else { "Save" };
+                    if ui.add_enabled(!self.busy, primary_button(label, &colors)).clicked() {
+                        self.save_pin();
+                    }
+                    if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+                        self.close_form();
+                    }
+                });
+            }
+            AccountForm::ChangePassword => {
+                secret_field(ui, "Current password", &mut self.pw_current, "Current password");
+                secret_field(ui, "New password", &mut self.pw_next, "New password");
+                secret_field(ui, "Confirm new password", &mut self.pw_confirm, "Confirm new password");
+                if self.pin_on {
+                    secret_field(ui, "Current PIN", &mut self.pin_current, "Current PIN");
+                }
+                notice(ui, &self.form_error, "");
+                ui.horizontal(|ui| {
+                    let label = if self.busy { "Saving…" } else { "Save" };
+                    if ui.add_enabled(!self.busy, primary_button(label, &colors)).clicked() {
+                        self.save_password();
+                    }
+                    if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+                        self.close_form();
+                    }
+                });
+            }
+            AccountForm::None => {}
+        }
+    }
+}
+
 impl eframe::App for DropApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         crate::mac_tray::refresh_command_menus();
         self.pump(ctx);
+        self.poll_pin();
+        self.show_account_form(ctx);
         if self.account.is_none() && !self.tried_biometrics && self.biometrics && !self.busy {
             self.tried_biometrics = true;
             self.unlock_with_biometrics();
@@ -993,6 +1204,12 @@ fn wordmark(ui: &mut egui::Ui) {
             ui.label(RichText::new("Private clipboard").size(11.0).color(colors.muted));
         });
     });
+}
+
+fn secret_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
+    let colors = colors(ui);
+    ui.label(RichText::new(label).color(colors.ink));
+    ui.add(TextEdit::singleline(value).password(true).desired_width(f32::INFINITY).hint_text(hint));
 }
 
 fn labeled(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {

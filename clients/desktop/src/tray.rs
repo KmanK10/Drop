@@ -7,8 +7,10 @@ pub enum TrayAction {
     Quit,
     /// `true` turns biometrics on, `false` deletes that keychain item.
     SetBiometric(bool),
-    /// `true` asks for a new PIN, `false` deletes the stored PIN wrap.
+    /// `true` opens Set PIN. `false` deletes the stored PIN wrap.
     SetPin(bool),
+    ChangePin,
+    ChangePassword,
     Dropped(Vec<PathBuf>),
 }
 

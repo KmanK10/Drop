@@ -7,7 +7,7 @@ use reqwest::Url;
 use serde_json::Value;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::bytes::{b64url_to_bytes, wipe_string};
+use crate::bytes::{b64url_to_bytes, bytes_to_b64url, timing_equal, wipe_string};
 use crate::crypto::{self, verify_key_check, KdfParams};
 use crate::error::DropError;
 use crate::format::{self, format_bytes, format_when, text_preview};
@@ -275,6 +275,80 @@ impl DropClient {
         self.zero_local();
         let _ = self.logout_request();
         self.jar.clear();
+    }
+
+    /// Re-encrypts every item under a new content key, then commits that registration.
+    /// The password is not sent. A failed attempt deletes the rekey and leaves the current key.
+    pub fn change_password(&mut self, current: &str, next: &str) -> Result<Snapshot, DropError> {
+        if current.is_empty() {
+            return Err(DropError::Message("Enter your current password.".into()));
+        }
+        if let Some(problem) = crypto::password_rejection(next, None) {
+            return Err(DropError::Message(problem.into()));
+        }
+        let old_key = self.ensure_unlocked()?.clone();
+        let me = self.get_json("/api/me")?;
+        let kdf = me.get("kdf").ok_or(DropError::KeyCheck)?;
+        let (params, salt) = crypto::parse_kdf(kdf)?;
+        let derived = crypto::derive_keys(current, &salt, &params)?;
+        let key_check = me
+            .get("keyCheck")
+            .and_then(|value| value.as_str())
+            .ok_or(DropError::KeyCheck)
+            .and_then(|text| b64url_to_bytes(text).map_err(|_| DropError::KeyCheck))?;
+        if !verify_key_check(&derived.content_key, &key_check).unwrap_or(false)
+            || !timing_equal(derived.content_key.as_slice(), old_key.as_slice())
+        {
+            return Err(DropError::Message("The current password is wrong.".into()));
+        }
+        let mut material = crypto::account_material(next)?;
+        let started = self.post_password_json(
+            "/api/account/password/start",
+            &serde_json::json!({ "currentAuthVerifier": bytes_to_b64url(&derived.auth_verifier) }),
+        )?;
+        let rekey_id = started.get("rekeyId").and_then(|value| value.as_str()).unwrap_or("").to_string();
+        if !valid_id(&rekey_id) {
+            return Err(DropError::Server("Start the password change again.".into()));
+        }
+        let rows = match started.get("items").and_then(|value| value.as_array()) {
+            Some(rows) => rows,
+            None => {
+                self.abort_rekey(&rekey_id);
+                return Err(DropError::Server("Start the password change again.".into()));
+            }
+        };
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = row.get("id").and_then(|value| value.as_str()).unwrap_or("");
+            if !valid_id(id) {
+                self.abort_rekey(&rekey_id);
+                return Err(DropError::Server("Start the password change again.".into()));
+            }
+            ids.push(id.to_string());
+        }
+        if let Err(error) = self.rekey_items(&ids, &rekey_id, &old_key, &material.content_key) {
+            self.abort_rekey(&rekey_id);
+            return Err(error);
+        }
+        let mut fields = crypto::registration_body(&material);
+        if let Some(map) = fields.as_object_mut() {
+            map.insert("rekeyId".into(), serde_json::Value::String(rekey_id.clone()));
+        }
+        let updated = match self.post_password_json("/api/account/password/commit", &fields) {
+            Ok(updated) => updated,
+            Err(error) => {
+                self.abort_rekey(&rekey_id);
+                return Err(error);
+            }
+        };
+        let new_key = std::mem::replace(&mut material.content_key, Zeroizing::new([0u8; 32]));
+        if let Some(previous) = self.content_key.as_mut() {
+            previous.zeroize();
+        }
+        self.content_key = Some(new_key);
+        let ttl = self.account.as_ref().map(|account| account.ttl_ms).unwrap_or(TTL_DEFAULT_MS);
+        self.account = Some(account_from_me(&updated, ttl)?);
+        self.refresh()
     }
 
     /// The content key and session cookie currently in memory. The password is
@@ -632,6 +706,80 @@ impl DropClient {
         self.account = None;
     }
 
+    fn rekey_items(
+        &self,
+        ids: &[String],
+        rekey_id: &str,
+        old_key: &[u8; 32],
+        new_key: &[u8; 32],
+    ) -> Result<(), DropError> {
+        for id in ids {
+            let path = item_path(id)?;
+            let (status, bytes) = self.request(reqwest::Method::GET, &path, None, None)?;
+            if status == 401 {
+                return Err(DropError::SignedOut);
+            }
+            if !(200..300).contains(&status) {
+                return Err(error_from(status, &bytes));
+            }
+            let mut plain = Zeroizing::new(crypto::decrypt(old_key, &bytes)?);
+            let ciphertext = match crypto::encrypt(new_key, &plain) {
+                Ok(ciphertext) => ciphertext,
+                Err(error) => {
+                    plain.zeroize();
+                    return Err(error);
+                }
+            };
+            plain.zeroize();
+            let put_path = format!("/api/account/password/items/{id}");
+            let (status, body) = self.put_rekey(&put_path, ciphertext, rekey_id)?;
+            if status == 401 {
+                return Err(DropError::SignedOut);
+            }
+            if !(200..300).contains(&status) {
+                return Err(error_from(status, &body));
+            }
+        }
+        Ok(())
+    }
+
+    fn put_rekey(&self, path: &str, body: Vec<u8>, rekey_id: &str) -> Result<(u16, Vec<u8>), DropError> {
+        let url = self.url(path)?;
+        let response = self
+            .http
+            .put(url)
+            .header(ACCEPT, "application/json")
+            .header(CSRF, "1")
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .header("x-drop-rekey", rekey_id)
+            .body(body)
+            .send()
+            .map_err(|_| DropError::Network)?;
+        let status = response.status().as_u16();
+        let bytes = response.bytes().map_err(|_| DropError::Network)?.to_vec();
+        Ok((status, bytes))
+    }
+
+    fn post_password_json(&self, path: &str, body: &Value) -> Result<Value, DropError> {
+        let bytes = serde_json::to_vec(body).map_err(|_| DropError::Message("Couldn't build that request.".into()))?;
+        let (status, response) = self.request(reqwest::Method::POST, path, Some(bytes), Some("application/json"))?;
+        if status == 401 {
+            return Err(password_or_signed_out(&response));
+        }
+        if !(200..300).contains(&status) {
+            return Err(error_from(status, &response));
+        }
+        serde_json::from_slice(&response).map_err(|_| DropError::Message("Something went wrong.".into()))
+    }
+
+    fn abort_rekey(&self, rekey_id: &str) {
+        if !valid_id(rekey_id) {
+            return;
+        }
+        let path = format!("/api/account/password/{rekey_id}");
+        let _ = self.request(reqwest::Method::DELETE, &path, None, None);
+    }
+
     fn post_json(&self, path: &str, body: &Value, session: bool) -> Result<Value, DropError> {
         let bytes = serde_json::to_vec(body).map_err(|_| DropError::Message("Couldn't build that request.".into()))?;
         let (status, response) = self.request(
@@ -810,6 +958,20 @@ fn broken_item(id: &str, created_at: i64, size: u64) -> MemoryItem {
         },
         text: None,
     }
+}
+
+fn password_or_signed_out(bytes: &[u8]) -> DropError {
+    if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+        if let Some(message) = value.get("error").and_then(|value| value.as_str()) {
+            if message == "Sign in again." {
+                return DropError::SignedOut;
+            }
+            if !message.is_empty() && message.len() < 400 && !message.contains('\n') && !message.contains('\r') {
+                return DropError::Server(message.to_string());
+            }
+        }
+    }
+    DropError::SignedOut
 }
 
 fn interpret_json(status: u16, bytes: &[u8], session: bool) -> Result<Value, DropError> {

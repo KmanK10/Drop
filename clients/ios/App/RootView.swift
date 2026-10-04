@@ -91,12 +91,6 @@ private struct SignInView: View {
                     Text("Use 4 to 8 digits.")
                         .font(.footnote)
                         .foregroundStyle(palette.muted)
-                    Button("Unlock with PIN") {
-                        model.unlockWithPin()
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(model.busy)
-                    .foregroundStyle(palette.ink)
                 }
                 Text("Accounts are invite-only. Ask the person who runs this Drop for a username. There is no public signup.")
                     .font(.footnote)
@@ -105,6 +99,9 @@ private struct SignInView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .onAppear { model.offerBiometrics() }
+        .onChange(of: model.pinEntry) { _, _ in
+            model.notePinEntry()
+        }
     }
 
     private func field(_ title: String, text: Binding<String>, secure: Bool, placeholder: String? = nil, keyboard: UIKeyboardType? = nil) -> some View {
@@ -472,9 +469,17 @@ private struct ItemCard: View {
     }
 }
 
+private enum SettingsForm {
+    case none
+    case setPin
+    case changePin
+    case password
+}
+
 private struct SettingsView: View {
     @EnvironmentObject private var model: SessionModel
     @Environment(\.colorScheme) private var colorScheme
+    @State private var form = SettingsForm.none
     @State private var current = ""
     @State private var next = ""
     @State private var confirm = ""
@@ -495,35 +500,57 @@ private struct SettingsView: View {
                     .disabled(model.busy)
                     .foregroundStyle(palette.ink)
                 }
-                Toggle("PIN", isOn: Binding(
-                    get: { model.pinOn || model.pinSetup },
-                    set: { model.setPin($0) }
-                ))
-                .disabled(model.busy)
-                .foregroundStyle(palette.ink)
-                if model.pinSetup {
-                    field("PIN", text: $pin, keyboard: .numberPad)
+                if model.pinOn {
+                    Toggle("PIN", isOn: Binding(
+                        get: { model.pinOn },
+                        set: { model.setPin($0) }
+                    ))
+                    .disabled(model.busy)
+                    .foregroundStyle(palette.ink)
+                }
+                if form == .none {
+                    Group {
+                        if model.pinOn {
+                            Button("Change PIN") { form = .changePin }
+                        } else {
+                            Button("Set PIN") { form = .setPin }
+                        }
+                        Button("Change password") { form = .password }
+                    }
+                    .disabled(model.busy)
+                    .foregroundStyle(palette.ink)
+                }
+                if form == .setPin || form == .changePin {
+                    if form == .changePin {
+                        field("Current PIN", text: $currentPin, keyboard: .numberPad)
+                    }
+                    field("New PIN", text: $pin, keyboard: .numberPad)
                     field("Confirm PIN", text: $pinConfirm, keyboard: .numberPad)
                     Text("Use 4 to 8 digits.")
                         .font(.footnote)
                         .foregroundStyle(palette.muted)
-                    Button("Save PIN") {
-                        model.savePin(pin: pin, confirm: pinConfirm)
+                    Button(model.settingsBusy.isEmpty ? "Save" : model.settingsBusy) {
+                        model.savePin(current: currentPin, newPin: pin, confirm: pinConfirm, changing: form == .changePin)
                     }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(model.busy)
+                    Button("Cancel") { clearForm() }
+                        .disabled(model.busy)
                 }
-                Text("Password")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(palette.ink)
-                field("Current password", text: $current)
-                field("New password", text: $next)
-                field("Confirm new password", text: $confirm)
-                if model.pinOn {
-                    field("Current PIN", text: $currentPin, keyboard: .numberPad)
-                    Text("Enter it to keep PIN unlock. Leave it blank, or enter the wrong PIN, and PIN unlock turns off.")
-                        .font(.footnote)
-                        .foregroundStyle(palette.muted)
+                if form == .password {
+                    field("Current password", text: $current)
+                    field("New password", text: $next)
+                    field("Confirm new password", text: $confirm)
+                    if model.pinOn {
+                        field("Current PIN", text: $currentPin, keyboard: .numberPad)
+                    }
+                    Button(model.settingsBusy.isEmpty ? "Save" : model.settingsBusy) {
+                        model.changePassword(current: current, next: next, confirm: confirm, pin: currentPin)
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(model.busy)
+                    Button("Cancel") { clearForm() }
+                        .disabled(model.busy)
                 }
                 if !model.settingsError.isEmpty {
                     Text(model.settingsError).font(.subheadline).foregroundStyle(palette.danger)
@@ -531,14 +558,6 @@ private struct SettingsView: View {
                 if !model.settingsStatus.isEmpty {
                     Text(model.settingsStatus).font(.subheadline).foregroundStyle(palette.muted)
                 }
-                Button {
-                    model.changePassword(current: current, next: next, confirm: confirm, pin: currentPin)
-                } label: {
-                    Text(model.settingsBusy.isEmpty ? "Change password" : model.settingsBusy)
-                        .multilineTextAlignment(.center)
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(model.busy)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -552,14 +571,19 @@ private struct SettingsView: View {
         .toolbarBackground(palette.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbarColorScheme(colorScheme == .dark ? .dark : .light, for: .navigationBar)
-        .onChange(of: model.passwordChangeDone) { _, _ in
-            current = ""
-            next = ""
-            confirm = ""
-            pin = ""
-            pinConfirm = ""
-            currentPin = ""
+        .onChange(of: model.formDone) { _, _ in
+            clearForm()
         }
+    }
+
+    private func clearForm() {
+        form = .none
+        current = ""
+        next = ""
+        confirm = ""
+        pin = ""
+        pinConfirm = ""
+        currentPin = ""
     }
 
     private func field(_ title: String, text: Binding<String>, keyboard: UIKeyboardType = .default) -> some View {

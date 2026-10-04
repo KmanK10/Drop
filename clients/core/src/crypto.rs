@@ -42,6 +42,24 @@ pub fn normalize_password(password: &str) -> String {
     password.nfkc().collect()
 }
 
+/// Same rules as the website. The confirmation is compared after NFKC.
+pub fn password_rejection(password: &str, confirm: Option<&str>) -> Option<&'static str> {
+    let normalized = normalize_password(password);
+    let count = normalized.chars().count();
+    if count < 10 {
+        return Some("Use at least 10 characters.");
+    }
+    if count > 200 {
+        return Some("That password is too long.");
+    }
+    if let Some(confirm) = confirm {
+        if normalize_password(confirm) != normalized {
+            return Some("Those passwords don't match.");
+        }
+    }
+    None
+}
+
 pub fn assert_strong_kdf(params: &KdfParams) -> Result<(), DropError> {
     if params.algo != "argon2id" {
         return Err(DropError::BadKdf);
@@ -181,6 +199,23 @@ pub fn parse_kdf(value: &serde_json::Value) -> Result<(KdfParams, Vec<u8>), Drop
         return Err(DropError::BadKdf);
     }
     Ok((params, salt))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_rules_match_the_browser() {
+        assert_eq!(password_rejection("short", Some("short")), Some("Use at least 10 characters."));
+        let too_long = "a".repeat(201);
+        assert_eq!(password_rejection(&too_long, Some(&too_long)), Some("That password is too long."));
+        assert_eq!(
+            password_rejection("long-enough-password", Some("different-password")),
+            Some("Those passwords don't match.")
+        );
+        assert_eq!(password_rejection("long-enough-password", Some("long-enough-password")), None);
+    }
 }
 
 fn json_u32(value: Option<&serde_json::Value>) -> Option<u32> {

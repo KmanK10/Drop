@@ -22,8 +22,8 @@ final class SessionModel: ObservableObject {
     @Published var biometryAvailable = false
     @Published var biometryLabel = "Unlock with Face ID"
     @Published var pinOn = false
-    @Published var pinSetup = false
     @Published var pinEntry = ""
+    @Published var formDone = 0
     @Published var settingsError = ""
     @Published var settingsStatus = ""
     @Published var settingsBusy = ""
@@ -31,6 +31,8 @@ final class SessionModel: ObservableObject {
 
     private var triedBiometrics = false
     private var biometricTicket = 0
+    private var pinUnlockTicket = 0
+    private var pinWait: DispatchWorkItem?
 
     private var client: DropClient?
     private let work = DispatchQueue(label: "com.kiefermenard.drop.session")
@@ -88,7 +90,6 @@ final class SessionModel: ObservableObject {
         biometricsOn = false
         PinStore.delete()
         pinOn = false
-        pinSetup = false
         pinEntry = ""
         settingsError = ""
         settingsStatus = ""
@@ -343,16 +344,17 @@ final class SessionModel: ObservableObject {
                     self.show(snapshot, status: "")
                     self.settingsBusy = ""
                     self.settingsError = ""
-                    var note = "Password changed. Other signed-in devices need the new password."
                     if hadPin && !pinKept {
-                        note += " PIN unlock is off until you set it again."
                         self.pinOn = false
-                        self.pinSetup = false
-                    } else if hadPin {
-                        self.pinOn = true
+                        self.settingsStatus = "Password changed. PIN is off."
+                    } else {
+                        if hadPin {
+                            self.pinOn = true
+                        }
+                        self.settingsStatus = "Password changed."
                     }
-                    self.settingsStatus = note
                     self.passwordChangeDone += 1
+                    self.formDone += 1
                     if self.biometricsOn {
                         self.refreshStoredUnlock(ticket: self.biometricTicket, dropStaleOnFailure: true)
                     }
@@ -396,22 +398,34 @@ final class SessionModel: ObservableObject {
         if !enabled {
             PinStore.delete()
             pinOn = false
-            pinSetup = false
-            return
         }
-        guard account != nil else {
-            error = "Sign in with your password before turning this on."
-            pinSetup = false
-            return
-        }
-        pinSetup = true
-        settingsError = ""
     }
 
-    func savePin(pin: String, confirm: String) {
+    func notePinEntry() {
+        pinWait?.cancel()
+        let pin = pinEntry
+        pinUnlockTicket += 1
+        let ticket = pinUnlockTicket
+        guard pinOn, account == nil else { return }
+        guard DropPin.rejection(pin, confirm: nil) == nil else { return }
+        let delay: TimeInterval = pin.count >= 8 ? 0 : 0.35
+        let work = DispatchWorkItem { [weak self] in
+            self?.startPinUnlock(pin, ticket: ticket)
+        }
+        pinWait = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    func savePin(current: String, newPin: String, confirm: String, changing: Bool) {
         settingsError = ""
         settingsStatus = ""
-        if let problem = DropPin.rejection(pin, confirm: confirm) {
+        if changing {
+            if let problem = DropPin.rejection(current, confirm: nil) {
+                settingsError = problem
+                return
+            }
+        }
+        if let problem = DropPin.rejection(newPin, confirm: confirm) {
             settingsError = problem
             return
         }
@@ -422,12 +436,35 @@ final class SessionModel: ObservableObject {
         busy = true
         settingsBusy = "Saving PIN…"
         work.async { [weak self] in
+            if changing {
+                guard let stored = PinStore.load() else {
+                    DispatchQueue.main.async {
+                        self?.pinOn = false
+                        self?.busy = false
+                        self?.settingsBusy = ""
+                        self?.settingsError = "PIN unlock is off."
+                    }
+                    return
+                }
+                var opened = (try? DropPin.unwrap(pin: current, blob: Array(stored))) ?? []
+                let matched = !opened.isEmpty
+                for index in opened.indices { opened[index] = 0 }
+                opened.removeAll()
+                if !matched {
+                    DispatchQueue.main.async {
+                        self?.busy = false
+                        self?.settingsBusy = ""
+                        self?.settingsError = "That PIN is wrong."
+                    }
+                    return
+                }
+            }
             var secret = Data()
             defer { wipe(&secret) }
             let saved: Bool
             do {
                 secret = try client.exportUnlock()
-                let wrapped = try DropPin.wrap(pin: pin, secret: Array(secret))
+                let wrapped = try DropPin.wrap(pin: newPin, secret: Array(secret))
                 saved = PinStore.save(Data(wrapped))
             } catch {
                 saved = false
@@ -438,7 +475,7 @@ final class SessionModel: ObservableObject {
                 self.settingsBusy = ""
                 if saved, self.account != nil {
                     self.pinOn = true
-                    self.pinSetup = false
+                    self.formDone += 1
                 } else {
                     if self.account == nil {
                         PinStore.delete()
@@ -450,14 +487,8 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    func unlockWithPin() {
-        guard pinOn, !busy else { return }
-        let pin = pinEntry
-        pinEntry = ""
-        if let problem = DropPin.rejection(pin, confirm: nil) {
-            error = problem
-            return
-        }
+    private func startPinUnlock(_ pin: String, ticket: Int) {
+        guard ticket == pinUnlockTicket, !busy, account == nil, pin == pinEntry else { return }
         let server = self.server.trimmingCharacters(in: .whitespacesAndNewlines)
         let username = self.username.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
@@ -467,10 +498,15 @@ final class SessionModel: ObservableObject {
         work.async { [weak self] in
             guard let stored = PinStore.load() else {
                 DispatchQueue.main.async {
-                    self?.pinOn = false
-                    self?.error = "PIN unlock is off."
-                    self?.busy = false
-                    self?.status = ""
+                    guard let self, self.pinUnlockTicket == ticket else {
+                        self?.busy = false
+                        self?.notePinEntry()
+                        return
+                    }
+                    self.pinOn = false
+                    self.error = "PIN unlock is off."
+                    self.busy = false
+                    self.status = ""
                 }
                 return
             }
@@ -489,18 +525,27 @@ final class SessionModel: ObservableObject {
                 let next = try DropClient(server: server)
                 let snapshot = try next.restore(data)
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    guard let self, self.pinUnlockTicket == ticket else {
+                        self?.busy = false
+                        self?.notePinEntry()
+                        return
+                    }
                     self.client = next
                     self.show(snapshot, status: "")
+                    self.pinEntry = ""
                     self.startRefresh()
                     self.drainInbox()
                 }
             } catch {
-                let text = (error as? DropError)?.text ?? "That PIN is wrong."
                 DispatchQueue.main.async {
-                    self?.error = text
-                    self?.busy = false
-                    self?.status = ""
+                    guard let self, self.pinUnlockTicket == ticket else {
+                        self?.busy = false
+                        self?.notePinEntry()
+                        return
+                    }
+                    self.error = "That PIN is wrong."
+                    self.busy = false
+                    self.status = ""
                 }
             }
         }

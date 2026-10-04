@@ -19,7 +19,7 @@ mod unlock;
 pub use bytes::{b64url_to_bytes, bytes_to_b64url};
 pub use client::{Account, CopyPayload, Downloaded, DropClient, ItemSummary, Snapshot};
 pub use crypto::{
-    account_material, assert_strong_kdf, decrypt, derive_keys, encrypt, registration_body,
+    account_material, assert_strong_kdf, decrypt, derive_keys, encrypt, password_rejection, registration_body,
     verify_key_check, AccountMaterial, Derived, KdfParams, KDF_MEMORY, KDF_PARALLELISM, KDF_TIME,
 };
 pub use error::DropError;

@@ -56,6 +56,8 @@ const ID_PIN: usize = 3;
 const ID_SIGNOUT: usize = 4;
 const ID_CLOSE: usize = 5;
 const ID_QUIT: usize = 6;
+const ID_CHANGE_PIN: usize = 7;
+const ID_PASSWORD: usize = 8;
 
 /// Window and icon handles are thread-safe values. The tray thread creates them
 /// and the UI thread only posts messages to the window.
@@ -355,8 +357,13 @@ fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
             let flags = if crate::biometric::enrolled() { MF_STRING | MF_CHECKED } else { MF_STRING };
             let _ = AppendMenuW(menu, flags, ID_HELLO, w!("Windows Hello"));
         }
-        let pin_flags = if crate::pin::enrolled() { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let _ = AppendMenuW(menu, pin_flags, ID_PIN, w!("PIN"));
+        if crate::pin::enrolled() {
+            let _ = AppendMenuW(menu, MF_STRING | MF_CHECKED, ID_PIN, w!("PIN"));
+            let _ = AppendMenuW(menu, MF_STRING, ID_CHANGE_PIN, w!("Change PIN"));
+        } else {
+            let _ = AppendMenuW(menu, MF_STRING, ID_PIN, w!("Set PIN"));
+        }
+        let _ = AppendMenuW(menu, MF_STRING, ID_PASSWORD, w!("Change password"));
         let _ = AppendMenuW(menu, MF_STRING, ID_SIGNOUT, w!("Sign out"));
         let close_flags = if crate::window_prefs::close_to_menu_bar() {
             MF_STRING | MF_CHECKED
@@ -383,6 +390,8 @@ fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
             ID_OPEN => Some(TrayAction::Open),
             ID_HELLO => Some(TrayAction::SetBiometric(!crate::biometric::enrolled())),
             ID_PIN => Some(TrayAction::SetPin(!crate::pin::enrolled())),
+            ID_CHANGE_PIN => Some(TrayAction::ChangePin),
+            ID_PASSWORD => Some(TrayAction::ChangePassword),
             ID_SIGNOUT => Some(TrayAction::SignOut),
             ID_CLOSE => {
                 crate::window_prefs::toggle();

@@ -212,6 +212,14 @@ unsafe fn status_target_class() -> &'static AnyClass {
         );
         builder.add_method(sel!(menuPin:), menu_pin as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
         builder.add_method(
+            sel!(menuChangePin:),
+            menu_change_pin as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        builder.add_method(
+            sel!(menuChangePassword:),
+            menu_change_password as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        builder.add_method(
             sel!(menuCloseToMenuBar:),
             menu_close_to_menu_bar as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
@@ -285,6 +293,14 @@ extern "C" fn menu_pin(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject
     emit(TrayAction::SetPin(turn_on));
 }
 
+extern "C" fn menu_change_pin(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+    emit(TrayAction::ChangePin);
+}
+
+extern "C" fn menu_change_password(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+    emit(TrayAction::ChangePassword);
+}
+
 extern "C" fn menu_close_to_menu_bar(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
     crate::window_prefs::toggle();
 }
@@ -331,7 +347,11 @@ unsafe fn install_application_menu(target: *mut AnyObject) {
             insert_item(app_menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled(), at);
             at += 1;
         }
-        insert_item(app_menu, "PIN", sel!(menuPin:), crate::pin::enrolled(), at);
+        insert_item(app_menu, if crate::pin::enrolled() { "PIN" } else { "Set PIN" }, sel!(menuPin:), crate::pin::enrolled(), at);
+        at += 1;
+        insert_item(app_menu, "Change PIN", sel!(menuChangePin:), false, at);
+        at += 1;
+        insert_item(app_menu, "Change password", sel!(menuChangePassword:), false, at);
         at += 1;
         insert_item(app_menu, "Sign out", sel!(menuSignOut:), false, at);
         at += 1;
@@ -364,7 +384,9 @@ unsafe fn install_dock_menu(target: *mut AnyObject) {
     if crate::biometric::available() {
         add_item(menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled());
     }
-    add_item(menu, "PIN", sel!(menuPin:), crate::pin::enrolled());
+    add_item(menu, if crate::pin::enrolled() { "PIN" } else { "Set PIN" }, sel!(menuPin:), crate::pin::enrolled());
+    add_item(menu, "Change PIN", sel!(menuChangePin:), false);
+    add_item(menu, "Change password", sel!(menuChangePassword:), false);
     add_item(menu, "Sign out", sel!(menuSignOut:), false);
     add_item(menu, "Quit", sel!(menuQuit:), false);
     let _: () = msg_send![menu, setDelegate: target];
@@ -393,7 +415,24 @@ unsafe fn refresh_menu(menu: *mut AnyObject, app_menu: bool) {
             .or_else(|| find_action(menu, sel!(menuQuit:)))
             .or_else(|| find_action(menu, sel!(terminate:)))
             .unwrap_or_else(|| item_count(menu));
-        insert_item(menu, "PIN", sel!(menuPin:), crate::pin::enrolled(), at);
+        insert_item(menu, if crate::pin::enrolled() { "PIN" } else { "Set PIN" }, sel!(menuPin:), crate::pin::enrolled(), at);
+    }
+    if !menu_has_action(menu, sel!(menuChangePin:)) {
+        let at = find_action(menu, sel!(menuChangePassword:))
+            .or_else(|| find_action(menu, sel!(menuSignOut:)))
+            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
+            .or_else(|| find_action(menu, sel!(menuQuit:)))
+            .or_else(|| find_action(menu, sel!(terminate:)))
+            .unwrap_or_else(|| item_count(menu));
+        insert_item(menu, "Change PIN", sel!(menuChangePin:), false, at);
+    }
+    if !menu_has_action(menu, sel!(menuChangePassword:)) {
+        let at = find_action(menu, sel!(menuSignOut:))
+            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
+            .or_else(|| find_action(menu, sel!(menuQuit:)))
+            .or_else(|| find_action(menu, sel!(terminate:)))
+            .unwrap_or_else(|| item_count(menu));
+        insert_item(menu, "Change password", sel!(menuChangePassword:), false, at);
     }
     if app_menu && !menu_has_action(menu, sel!(menuCloseToMenuBar:)) {
         let at = find_action(menu, sel!(menuQuit:))
@@ -415,8 +454,14 @@ unsafe fn refresh_menu(menu: *mut AnyObject, app_menu: bool) {
             let _: () = msg_send![item, setState: state];
         }
         if item_action_is(item, sel!(menuPin:)) {
+            let title = if pin_on { "PIN" } else { "Set PIN" };
+            let _: () = msg_send![item, setTitle: ns_string(title)];
             let state: isize = if pin_on { 1 } else { 0 };
             let _: () = msg_send![item, setState: state];
+        }
+        if item_action_is(item, sel!(menuChangePin:)) {
+            let hidden: Bool = if pin_on { Bool::NO } else { Bool::YES };
+            let _: () = msg_send![item, setHidden: hidden];
         }
         if item_action_is(item, sel!(menuCloseToMenuBar:)) {
             let state: isize = if close_on { 1 } else { 0 };
@@ -502,7 +547,11 @@ extern "C" fn right_mouse_up(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObj
         if crate::biometric::available() {
             add_item(menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled());
         }
-        add_item(menu, "PIN", sel!(menuPin:), crate::pin::enrolled());
+        add_item(menu, if crate::pin::enrolled() { "PIN" } else { "Set PIN" }, sel!(menuPin:), crate::pin::enrolled());
+        if crate::pin::enrolled() {
+            add_item(menu, "Change PIN", sel!(menuChangePin:), false);
+        }
+        add_item(menu, "Change password", sel!(menuChangePassword:), false);
         add_item(menu, "Sign out", sel!(menuSignOut:), false);
         add_item(menu, "Quit", sel!(menuQuit:), false);
         let _: () = msg_send![class!(NSMenu), popUpContextMenu: menu withEvent: event forView: this];

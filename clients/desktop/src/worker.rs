@@ -32,6 +32,16 @@ pub enum Command {
         pin: Zeroizing<String>,
         epoch: u64,
     },
+    ChangePin {
+        current: Zeroizing<String>,
+        new_pin: Zeroizing<String>,
+        epoch: u64,
+    },
+    ChangePassword {
+        current: Zeroizing<String>,
+        next: Zeroizing<String>,
+        pin: Zeroizing<String>,
+    },
     UnlockPin {
         server: String,
         username: String,
@@ -57,6 +67,7 @@ pub enum WorkerEvent {
     PinStored { epoch: u64 },
     PinRejected,
     PinFailed { message: String },
+    PasswordChanged { snapshot: Snapshot, pin_kept: bool },
 }
 
 pub fn spawn(rx: Receiver<Command>, tx: Sender<WorkerEvent>) -> std::thread::JoinHandle<()> {
@@ -137,6 +148,95 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
                         let _ = tx.send(WorkerEvent::PinFailed {
                             message: error.to_string(),
                         });
+                    }
+                }
+            }
+            Command::ChangePin {
+                mut current,
+                mut new_pin,
+                epoch,
+            } => {
+                if crate::pin::enrolled() {
+                    match crate::pin::open(current.as_str()) {
+                        Ok(mut plain) => {
+                            plain.zeroize();
+                        }
+                        Err(crate::pin::PinError::Wrong) => {
+                            current.zeroize();
+                            new_pin.zeroize();
+                            let _ = tx.send(WorkerEvent::PinRejected);
+                            continue;
+                        }
+                        Err(crate::pin::PinError::Failed(message)) => {
+                            current.zeroize();
+                            new_pin.zeroize();
+                            let _ = tx.send(WorkerEvent::PinFailed { message });
+                            continue;
+                        }
+                    }
+                }
+                current.zeroize();
+                let Some(active) = client.as_ref() else {
+                    new_pin.zeroize();
+                    let _ = tx.send(WorkerEvent::PinFailed {
+                        message: "Sign in with your password before turning this on.".into(),
+                    });
+                    continue;
+                };
+                match active.unlock_material().and_then(|material| material.encode()) {
+                    Ok(bytes) => match crate::pin::store(new_pin.as_str(), &bytes) {
+                        Ok(()) => {
+                            new_pin.zeroize();
+                            let _ = tx.send(WorkerEvent::PinStored { epoch });
+                        }
+                        Err(crate::pin::PinError::Failed(message)) => {
+                            new_pin.zeroize();
+                            let _ = tx.send(WorkerEvent::PinFailed { message });
+                        }
+                        Err(crate::pin::PinError::Wrong) => {
+                            new_pin.zeroize();
+                            let _ = tx.send(WorkerEvent::PinFailed {
+                                message: "Couldn't store the PIN.".into(),
+                            });
+                        }
+                    },
+                    Err(error) => {
+                        new_pin.zeroize();
+                        let _ = tx.send(WorkerEvent::PinFailed {
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            }
+            Command::ChangePassword {
+                mut current,
+                mut next,
+                mut pin,
+            } => {
+                let Some(active) = client.as_mut() else {
+                    current.zeroize();
+                    next.zeroize();
+                    pin.zeroize();
+                    let _ = tx.send(WorkerEvent::Error("Sign in before changing the password.".into()));
+                    continue;
+                };
+                match active.change_password(current.as_str(), next.as_str()) {
+                    Ok(snapshot) => {
+                        current.zeroize();
+                        next.zeroize();
+                        let pin_kept = refresh_pin(active, pin.as_str());
+                        pin.zeroize();
+                        let _ = tx.send(WorkerEvent::PasswordChanged { snapshot, pin_kept });
+                    }
+                    Err(error) => {
+                        current.zeroize();
+                        next.zeroize();
+                        pin.zeroize();
+                        if matches!(error, DropError::SignedOut) {
+                            let _ = tx.send(WorkerEvent::SignedOut);
+                        } else {
+                            let _ = tx.send(WorkerEvent::Error(error.to_string()));
+                        }
                     }
                 }
             }
@@ -302,6 +402,39 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
                 };
                 report(client.delete_item(&id), &tx);
             }
+        }
+    }
+}
+
+fn refresh_pin(client: &DropClient, pin: &str) -> bool {
+    if !crate::pin::enrolled() {
+        return true;
+    }
+    if drop_core::pin_rejection(pin, None).is_some() {
+        crate::pin::delete();
+        return false;
+    }
+    match crate::pin::open(pin) {
+        Ok(mut plain) => {
+            plain.zeroize();
+            let bytes = match client.unlock_material().and_then(|material| material.encode()) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    crate::pin::delete();
+                    return false;
+                }
+            };
+            match crate::pin::store(pin, &bytes) {
+                Ok(()) => true,
+                Err(_) => {
+                    crate::pin::delete();
+                    false
+                }
+            }
+        }
+        Err(_) => {
+            crate::pin::delete();
+            false
         }
     }
 }
