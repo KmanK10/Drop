@@ -4,7 +4,7 @@
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
@@ -14,7 +14,8 @@ use crate::icon;
 use crate::tray::{TrayAction, TrayPorts};
 
 static ACTIONS: OnceLock<Sender<TrayAction>> = OnceLock::new();
-static WAKE: OnceLock<Box<dyn Fn() + Send>> = OnceLock::new();
+// The wake callback is `Send` but not `Sync`. `OnceLock` in a static requires `Sync`.
+static WAKE: OnceLock<Mutex<Box<dyn Fn() + Send>>> = OnceLock::new();
 static BUTTON: OnceLock<usize> = OnceLock::new();
 static STATUS_ITEM: OnceLock<usize> = OnceLock::new();
 static TARGET: OnceLock<usize> = OnceLock::new();
@@ -25,7 +26,7 @@ pub fn start(wake: impl Fn() + Send + 'static) -> Result<TrayPorts, String> {
     }
     let (tx, rx) = mpsc::channel();
     let _ = ACTIONS.set(tx);
-    let _ = WAKE.set(Box::new(wake));
+    let _ = WAKE.set(Mutex::new(Box::new(wake)));
     unsafe { install_status_item()? };
     let tooltip_button = *BUTTON.get().ok_or("Missing menu bar button.")?;
     let status_item = *STATUS_ITEM.get().ok_or("Missing menu bar item.")?;
@@ -127,16 +128,18 @@ unsafe fn status_target_class() -> &'static AnyClass {
     static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
     CLASS.get_or_init(|| {
         let mut builder = ClassBuilder::new("DropStatusTarget", class!(NSObject)).expect("DropStatusTarget");
+        // Pointer receivers. `&AnyObject` carries a lifetime, and objc2's
+        // `MethodImplementation` impl is not higher-ranked over that lifetime.
         builder.add_method(
             sel!(statusClicked:),
-            status_clicked as extern "C" fn(&AnyObject, Sel, *mut AnyObject),
+            status_clicked as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
-        builder.add_method(sel!(menuOpen:), menu_open as extern "C" fn(&AnyObject, Sel, *mut AnyObject));
+        builder.add_method(sel!(menuOpen:), menu_open as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
         builder.add_method(
             sel!(menuSignOut:),
-            menu_sign_out as extern "C" fn(&AnyObject, Sel, *mut AnyObject),
+            menu_sign_out as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
-        builder.add_method(sel!(menuQuit:), menu_quit as extern "C" fn(&AnyObject, Sel, *mut AnyObject));
+        builder.add_method(sel!(menuQuit:), menu_quit as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
         builder.register()
     })
 }
@@ -147,59 +150,59 @@ unsafe fn subclass_button_for_drops(button: *mut AnyObject) {
     let mut builder = ClassBuilder::new("DropStatusButton", superclass).expect("DropStatusButton");
     builder.add_method(
         sel!(draggingEntered:),
-        dragging_entered as extern "C" fn(&AnyObject, Sel, *mut AnyObject) -> usize,
+        dragging_entered as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> usize,
     );
     builder.add_method(
         sel!(draggingUpdated:),
-        dragging_entered as extern "C" fn(&AnyObject, Sel, *mut AnyObject) -> usize,
+        dragging_entered as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> usize,
     );
     builder.add_method(
         sel!(prepareForDragOperation:),
-        prepare_drag as extern "C" fn(&AnyObject, Sel, *mut AnyObject) -> Bool,
+        prepare_drag as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool,
     );
     builder.add_method(
         sel!(performDragOperation:),
-        perform_drag as extern "C" fn(&AnyObject, Sel, *mut AnyObject) -> Bool,
+        perform_drag as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool,
     );
     builder.add_method(
         sel!(draggingExited:),
-        dragging_exited as extern "C" fn(&AnyObject, Sel, *mut AnyObject),
+        dragging_exited as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
     );
     builder.add_method(
         sel!(rightMouseUp:),
-        right_mouse_up as extern "C" fn(&AnyObject, Sel, *mut AnyObject),
+        right_mouse_up as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
     );
     let class = builder.register();
     let _old = AnyObject::set_class(&*button, class);
 }
 
-extern "C" fn status_clicked(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+extern "C" fn status_clicked(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
     emit(TrayAction::Open);
 }
 
-extern "C" fn menu_open(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+extern "C" fn menu_open(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
     emit(TrayAction::Open);
 }
 
-extern "C" fn menu_sign_out(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+extern "C" fn menu_sign_out(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
     emit(TrayAction::SignOut);
 }
 
-extern "C" fn menu_quit(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+extern "C" fn menu_quit(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
     emit(TrayAction::Quit);
 }
 
-extern "C" fn dragging_entered(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) -> usize {
+extern "C" fn dragging_entered(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) -> usize {
     1
 }
 
-extern "C" fn prepare_drag(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) -> Bool {
+extern "C" fn prepare_drag(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) -> Bool {
     Bool::YES
 }
 
-extern "C" fn dragging_exited(_this: &AnyObject, _cmd: Sel, _sender: *mut AnyObject) {}
+extern "C" fn dragging_exited(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {}
 
-extern "C" fn perform_drag(_this: &AnyObject, _cmd: Sel, sender: *mut AnyObject) -> Bool {
+extern "C" fn perform_drag(_this: *mut AnyObject, _cmd: Sel, sender: *mut AnyObject) -> Bool {
     let paths = unsafe { paths_from_drag(sender) };
     if paths.is_empty() {
         Bool::NO
@@ -209,7 +212,7 @@ extern "C" fn perform_drag(_this: &AnyObject, _cmd: Sel, sender: *mut AnyObject)
     }
 }
 
-extern "C" fn right_mouse_up(this: &AnyObject, _cmd: Sel, event: *mut AnyObject) {
+extern "C" fn right_mouse_up(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObject) {
     unsafe {
         let menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
         let menu: *mut AnyObject = msg_send![menu, init];
@@ -277,7 +280,9 @@ fn emit(action: TrayAction) {
         let _ = tx.send(action);
     }
     if let Some(wake) = WAKE.get() {
-        wake();
+        if let Ok(wake) = wake.lock() {
+            wake();
+        }
     }
 }
 
