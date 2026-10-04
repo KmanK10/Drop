@@ -6,8 +6,10 @@ mod app;
 mod icon;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod tray;
-#[cfg(target_os = "macos")]
-mod mac_prefs;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod pin;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod window_prefs;
 #[cfg(target_os = "macos")]
 mod mac_tray;
 #[cfg(target_os = "windows")]

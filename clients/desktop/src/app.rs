@@ -13,6 +13,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::biometric::{self, BiometricError};
 use crate::icon;
+use crate::pin;
 use crate::tray::{TrayAction, TrayPorts};
 use crate::worker::{self, Command, WorkerEvent};
 
@@ -132,10 +133,15 @@ struct DropApp {
     quit: bool,
     pending_drops: Vec<PathBuf>,
     biometrics: bool,
-    biometric_available: bool,
     tried_biometrics: bool,
     refresh_biometrics: bool,
     biometric_epoch: u64,
+    pin_on: bool,
+    pin_setup: bool,
+    pin_new: String,
+    pin_confirm: String,
+    pin_entry: String,
+    pin_epoch: u64,
     tx: Sender<Command>,
     ui_tx: Sender<WorkerEvent>,
     rx: Receiver<WorkerEvent>,
@@ -159,6 +165,7 @@ impl Drop for TrayHandle {
 
 impl DropApp {
     fn new(settings: Settings, settings_path: PathBuf) -> Self {
+        crate::window_prefs::load();
         let (tx, worker_rx) = mpsc::channel();
         let (event_tx, rx) = mpsc::channel();
         let ui_tx = event_tx.clone();
@@ -179,10 +186,15 @@ impl DropApp {
             quit: false,
             pending_drops: Vec::new(),
             biometrics: biometric::enrolled(),
-            biometric_available: biometric::available(),
             tried_biometrics: false,
             refresh_biometrics: false,
             biometric_epoch: 0,
+            pin_on: pin::enrolled(),
+            pin_setup: false,
+            pin_new: String::new(),
+            pin_confirm: String::new(),
+            pin_entry: String::new(),
+            pin_epoch: 0,
             tx,
             ui_tx,
             rx,
@@ -243,8 +255,19 @@ impl DropApp {
             TrayAction::Open => show_window(ctx),
             TrayAction::SignOut => self.sign_out(),
             TrayAction::Quit => self.request_quit(ctx),
-            #[cfg(target_os = "macos")]
-            TrayAction::SetBiometric(enabled) => self.set_biometrics(enabled),
+            TrayAction::SetBiometric(enabled) => {
+                if enabled && self.account.is_none() {
+                    show_window(ctx);
+                }
+                self.set_biometrics(enabled);
+            }
+            TrayAction::SetPin(enabled) => {
+                if enabled {
+                    self.begin_pin(ctx);
+                } else {
+                    self.clear_pin();
+                }
+            }
             TrayAction::Dropped(paths) => {
                 show_window(ctx);
                 if self.account.is_none() {
@@ -321,9 +344,6 @@ impl DropApp {
                 }
                 self.biometrics = true;
                 self.busy = false;
-                if !cfg!(target_os = "macos") {
-                    self.status = format!("{} is on.", biometric::label());
-                }
             }
             WorkerEvent::BiometricCanceled { epoch } => {
                 if epoch != self.biometric_epoch {
@@ -358,6 +378,34 @@ impl DropApp {
                     Err(error) => self.error = error,
                 }
             }
+            WorkerEvent::PinStored { epoch } => {
+                if epoch != self.pin_epoch || self.account.is_none() {
+                    pin::delete();
+                    if epoch == self.pin_epoch {
+                        self.pin_on = false;
+                        self.pin_setup = false;
+                        self.busy = false;
+                    }
+                    return;
+                }
+                self.pin_on = true;
+                self.pin_setup = false;
+                self.busy = false;
+                self.status.clear();
+            }
+            WorkerEvent::PinRejected => {
+                self.error = "That PIN is wrong.".into();
+                self.busy = false;
+                self.status.clear();
+                show_window(ctx);
+            }
+            WorkerEvent::PinFailed { message } => {
+                self.pin_on = pin::enrolled();
+                self.error = message;
+                self.busy = false;
+                self.status.clear();
+                show_window(ctx);
+            }
             WorkerEvent::Download(mut file) => {
                 self.busy = false;
                 if let Some(path) = rfd::FileDialog::new().set_file_name(&file.name).save_file() {
@@ -375,7 +423,7 @@ impl DropApp {
     fn request_quit(&mut self, ctx: &Context) {
         self.quit = true;
         let _ = self.tx.send(Command::Shutdown {
-            keep_session: biometric::enrolled(),
+            keep_session: keep_session(),
         });
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
@@ -398,10 +446,73 @@ impl DropApp {
             biometric::delete();
             self.biometrics = false;
             self.refresh_biometrics = false;
-            if !cfg!(target_os = "macos") {
-                self.status = format!("{} is off.", biometric::label());
-            }
         }
+    }
+
+    fn begin_pin(&mut self, ctx: &Context) {
+        show_window(ctx);
+        if self.account.is_none() {
+            self.error = "Sign in with your password before turning this on.".into();
+            return;
+        }
+        self.pin_setup = true;
+        self.error.clear();
+    }
+
+    fn clear_pin(&mut self) {
+        self.pin_epoch = self.pin_epoch.wrapping_add(1);
+        pin::delete();
+        self.pin_on = false;
+        self.pin_setup = false;
+        self.pin_new.zeroize();
+        self.pin_new.clear();
+        self.pin_confirm.zeroize();
+        self.pin_confirm.clear();
+    }
+
+    fn save_pin(&mut self) {
+        if self.busy {
+            return;
+        }
+        if let Some(problem) = drop_core::pin_rejection(&self.pin_new, Some(&self.pin_confirm)) {
+            self.error = problem.into();
+            return;
+        }
+        let pin = Zeroizing::new(std::mem::take(&mut self.pin_new));
+        self.pin_confirm.zeroize();
+        self.pin_confirm.clear();
+        self.pin_epoch = self.pin_epoch.wrapping_add(1);
+        let epoch = self.pin_epoch;
+        self.busy = true;
+        self.error.clear();
+        self.status = "Saving PIN…".into();
+        self.send(Command::StorePin { pin, epoch });
+    }
+
+    fn unlock_with_pin(&mut self) {
+        if self.busy {
+            return;
+        }
+        if let Some(problem) = drop_core::pin_rejection(&self.pin_entry, None) {
+            self.error = problem.into();
+            return;
+        }
+        let server = self.server.trim().to_string();
+        let username = self.username.trim().to_string();
+        if server.is_empty() || username.is_empty() {
+            self.error = "Enter the server, username, and password.".into();
+            return;
+        }
+        let pin = Zeroizing::new(std::mem::take(&mut self.pin_entry));
+        self.busy = true;
+        self.error.clear();
+        self.status = "Unlocking…".into();
+        self.http = server.starts_with("http://");
+        self.send(Command::UnlockPin {
+            server,
+            username,
+            pin,
+        });
     }
 
     fn sign_out(&mut self) {
@@ -409,6 +520,7 @@ impl DropApp {
         biometric::delete();
         self.biometrics = false;
         self.refresh_biometrics = false;
+        self.clear_pin();
         self.busy = true;
         self.send(Command::SignOut);
     }
@@ -544,11 +656,28 @@ impl DropApp {
                 self.unlock_with_biometrics();
             }
         }
+        if self.pin_on {
+            ui.add_space(8.0);
+            ui.label(RichText::new("PIN").color(colors.ink));
+            ui.add(
+                TextEdit::singleline(&mut self.pin_entry)
+                    .password(true)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("PIN"),
+            );
+            ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
+            if ui.add_enabled(!self.busy, Button::new("Unlock with PIN")).clicked() {
+                self.unlock_with_pin();
+            }
+        }
         ui.add_space(12.0);
         ui.label(
-            RichText::new("Accounts are invite-only. Ask the person who runs this Drop for a username. Closing this window keeps Drop in the tray.")
-                .color(colors.muted)
-                .size(12.0),
+            RichText::new(format!(
+                "Accounts are invite-only. Ask the person who runs this Drop for a username. {}",
+                close_note()
+            ))
+            .color(colors.muted)
+            .size(12.0),
         );
     }
 
@@ -557,20 +686,8 @@ impl DropApp {
         let Some(account) = account else {
             return;
         };
-        ui.horizontal(|ui| {
-            wordmark(ui);
-            // Mac keeps Sign out, Quit, and Touch ID on the menu-bar menu.
-            if !cfg!(target_os = "macos") {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(Button::new("Quit")).clicked() {
-                        self.request_quit(ctx);
-                    }
-                    if ui.add(Button::new("Sign out")).clicked() && !self.busy {
-                        self.sign_out();
-                    }
-                });
-            }
-        });
+        let _ = ctx;
+        wordmark(ui);
         let colors = colors(ui);
         ui.label(
             RichText::new(format!(
@@ -590,17 +707,36 @@ impl DropApp {
                     .size(12.0),
             );
         }
-        if self.biometric_available && !cfg!(target_os = "macos") {
-            let mut enabled = self.biometrics;
-            let response = ui.add_enabled(!self.busy, egui::Checkbox::new(&mut enabled, biometric::label()));
-            if response.changed() {
-                self.set_biometrics(enabled);
-            }
-            ui.label(
-                RichText::new("Off until you turn this on after signing in with your password. The content key goes in the system keychain, not a file, and the password is not stored. Sign out removes it.")
-                    .color(colors.muted)
-                    .size(11.0),
+        if self.pin_setup {
+            ui.add_space(8.0);
+            ui.label(RichText::new("PIN").color(colors.ink));
+            ui.add(
+                TextEdit::singleline(&mut self.pin_new)
+                    .password(true)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("PIN"),
             );
+            ui.label(RichText::new("Confirm PIN").color(colors.ink));
+            ui.add(
+                TextEdit::singleline(&mut self.pin_confirm)
+                    .password(true)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Confirm PIN"),
+            );
+            ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!self.busy, primary_button("Save PIN", &colors)).clicked() {
+                    self.save_pin();
+                }
+                if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+                    self.pin_setup = false;
+                    self.pin_new.zeroize();
+                    self.pin_new.clear();
+                    self.pin_confirm.zeroize();
+                    self.pin_confirm.clear();
+                    self.pin_on = pin::enrolled();
+                }
+            });
         }
         ui.add_space(8.0);
         ui.add(
@@ -636,22 +772,7 @@ impl DropApp {
             }
         });
         ui.add_space(6.0);
-        #[cfg(target_os = "macos")]
-        let note = if crate::mac_tray::close_to_menu_bar() {
-            "Closing this window keeps Drop in the menu bar.".to_string()
-        } else {
-            "Closing this window quits Drop.".to_string()
-        };
-        #[cfg(not(target_os = "macos"))]
-        let note = {
-            let forget = if self.biometrics {
-                "Sign out removes the keychain item."
-            } else {
-                "Quit forgets the key."
-            };
-            format!("Closing this window keeps Drop in the notification area. {forget}")
-        };
-        ui.label(RichText::new(note).color(colors.muted).size(11.0));
+        ui.label(RichText::new(close_note()).color(colors.muted).size(11.0));
     }
 
     fn item_card(&mut self, ui: &mut egui::Ui, item: &ItemSummary) {
@@ -675,36 +796,13 @@ impl DropApp {
                             self.error.clear();
                             self.send(Command::Copy(item.id.clone()));
                         }
-                        if cfg!(target_os = "macos") {
-                            if ui
-                                .add_enabled(!self.busy, Button::new(RichText::new("Download").color(colors.green)))
-                                .clicked()
-                            {
-                                self.busy = true;
-                                self.error.clear();
-                                self.send(Command::Download(item.id.clone()));
-                            }
-                        } else {
-                            ui.add_enabled_ui(!self.busy, |ui| {
-                                let menu_id = ui.id().with("shortcuts");
-                                let mut bar = egui::menu::BarState::load(ui.ctx(), menu_id);
-                                let plus = row_mark(ui, RowMark::Plus, colors.green).on_hover_text("Shortcuts");
-                                bar.bar_menu(&plus, |ui| {
-                                    if item.can_copy && ui.button("Copy").clicked() {
-                                        ui.close_menu();
-                                        self.busy = true;
-                                        self.error.clear();
-                                        self.send(Command::Copy(item.id.clone()));
-                                    }
-                                    if ui.button("Download").clicked() {
-                                        ui.close_menu();
-                                        self.busy = true;
-                                        self.error.clear();
-                                        self.send(Command::Download(item.id.clone()));
-                                    }
-                                });
-                                bar.store(ui.ctx(), menu_id);
-                            });
+                        if ui
+                            .add_enabled(!self.busy, Button::new(RichText::new("Download").color(colors.green)))
+                            .clicked()
+                        {
+                            self.busy = true;
+                            self.error.clear();
+                            self.send(Command::Download(item.id.clone()));
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.add_enabled_ui(!self.busy, |ui| {
@@ -777,20 +875,15 @@ impl eframe::App for DropApp {
             self.unlock_with_biometrics();
         }
         if ctx.input(|input| input.viewport().close_requested()) && !self.quit {
-            #[cfg(target_os = "macos")]
-            if crate::mac_tray::close_to_menu_bar() {
+            if crate::window_prefs::close_to_menu_bar() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                // Fully closed: menu bar only. A minimized window stays in the Dock,
-                // because minimize does not request close.
+                // Fully closed: menu bar or notification area only. A minimized
+                // window stays in the Dock, because minimize does not request close.
+                #[cfg(target_os = "macos")]
                 crate::mac_tray::set_dock_icon_visible(false);
             } else {
                 self.request_quit(ctx);
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
         }
         CentralPanel::default().show(ctx, |ui| {
@@ -805,11 +898,26 @@ impl eframe::App for DropApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         let _ = self.tx.send(Command::Shutdown {
-            keep_session: biometric::enrolled(),
+            keep_session: keep_session(),
         });
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+fn keep_session() -> bool {
+    biometric::enrolled() || pin::enrolled()
+}
+
+fn close_note() -> &'static str {
+    if !crate::window_prefs::close_to_menu_bar() {
+        return "Closing this window quits Drop.";
+    }
+    if cfg!(target_os = "macos") {
+        "Closing this window keeps Drop in the menu bar."
+    } else {
+        "Closing this window keeps Drop in the notification area."
     }
 }
 
@@ -898,7 +1006,6 @@ fn labeled(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
 }
 
 enum RowMark {
-    Plus,
     Trash,
 }
 
@@ -912,10 +1019,6 @@ fn row_mark(ui: &mut egui::Ui, mark: RowMark, ink: Color32) -> egui::Response {
         let stroke = Stroke::new(1.5_f32, ink);
         painter.circle_stroke(center, size * 0.5 - 1.0, stroke);
         match mark {
-            RowMark::Plus => {
-                painter.hline(center.x - 5.0..=center.x + 5.0, center.y, stroke);
-                painter.vline(center.x, center.y - 5.0..=center.y + 5.0, stroke);
-            }
             RowMark::Trash => {
                 painter.hline(center.x - 5.5..=center.x + 5.5, center.y - 4.0, stroke);
                 painter.hline(center.x - 2.0..=center.x + 2.0, center.y - 6.2, stroke);

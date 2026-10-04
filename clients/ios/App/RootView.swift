@@ -86,6 +86,18 @@ private struct SignInView: View {
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(model.busy)
                 }
+                if model.pinOn {
+                    field("PIN", text: $model.pinEntry, secure: true, keyboard: .numberPad)
+                    Text("Use 4 to 8 digits.")
+                        .font(.footnote)
+                        .foregroundStyle(palette.muted)
+                    Button("Unlock with PIN") {
+                        model.unlockWithPin()
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.busy)
+                    .foregroundStyle(palette.ink)
+                }
                 Text("Accounts are invite-only. Ask the person who runs this Drop for a username. There is no public signup.")
                     .font(.footnote)
                     .foregroundStyle(palette.muted)
@@ -95,7 +107,7 @@ private struct SignInView: View {
         .onAppear { model.offerBiometrics() }
     }
 
-    private func field(_ title: String, text: Binding<String>, secure: Bool, placeholder: String? = nil) -> some View {
+    private func field(_ title: String, text: Binding<String>, secure: Bool, placeholder: String? = nil, keyboard: UIKeyboardType? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).foregroundStyle(palette.ink)
             LineField(
@@ -105,7 +117,7 @@ private struct SignInView: View {
                 ink: UIColor(palette.ink),
                 muted: UIColor(palette.muted),
                 caret: UIColor(palette.green),
-                keyboard: title == "Server" ? .URL : .default
+                keyboard: keyboard ?? (title == "Server" ? .URL : .default)
             )
             .padding(12)
             .background(palette.card)
@@ -466,6 +478,9 @@ private struct SettingsView: View {
     @State private var current = ""
     @State private var next = ""
     @State private var confirm = ""
+    @State private var pin = ""
+    @State private var pinConfirm = ""
+    @State private var currentPin = ""
 
     private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
 
@@ -480,12 +495,36 @@ private struct SettingsView: View {
                     .disabled(model.busy)
                     .foregroundStyle(palette.ink)
                 }
+                Toggle("PIN", isOn: Binding(
+                    get: { model.pinOn || model.pinSetup },
+                    set: { model.setPin($0) }
+                ))
+                .disabled(model.busy)
+                .foregroundStyle(palette.ink)
+                if model.pinSetup {
+                    field("PIN", text: $pin, keyboard: .numberPad)
+                    field("Confirm PIN", text: $pinConfirm, keyboard: .numberPad)
+                    Text("Use 4 to 8 digits.")
+                        .font(.footnote)
+                        .foregroundStyle(palette.muted)
+                    Button("Save PIN") {
+                        model.savePin(pin: pin, confirm: pinConfirm)
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(model.busy)
+                }
                 Text("Password")
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(palette.ink)
                 field("Current password", text: $current)
                 field("New password", text: $next)
                 field("Confirm new password", text: $confirm)
+                if model.pinOn {
+                    field("Current PIN", text: $currentPin, keyboard: .numberPad)
+                    Text("Enter it to keep PIN unlock. Leave it blank, or enter the wrong PIN, and PIN unlock turns off.")
+                        .font(.footnote)
+                        .foregroundStyle(palette.muted)
+                }
                 if !model.settingsError.isEmpty {
                     Text(model.settingsError).font(.subheadline).foregroundStyle(palette.danger)
                 }
@@ -493,7 +532,7 @@ private struct SettingsView: View {
                     Text(model.settingsStatus).font(.subheadline).foregroundStyle(palette.muted)
                 }
                 Button {
-                    model.changePassword(current: current, next: next, confirm: confirm)
+                    model.changePassword(current: current, next: next, confirm: confirm, pin: currentPin)
                 } label: {
                     Text(model.settingsBusy.isEmpty ? "Change password" : model.settingsBusy)
                         .multilineTextAlignment(.center)
@@ -517,10 +556,13 @@ private struct SettingsView: View {
             current = ""
             next = ""
             confirm = ""
+            pin = ""
+            pinConfirm = ""
+            currentPin = ""
         }
     }
 
-    private func field(_ title: String, text: Binding<String>) -> some View {
+    private func field(_ title: String, text: Binding<String>, keyboard: UIKeyboardType = .default) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).foregroundStyle(palette.ink)
             LineField(
@@ -530,7 +572,7 @@ private struct SettingsView: View {
                 ink: UIColor(palette.ink),
                 muted: UIColor(palette.muted),
                 caret: UIColor(palette.green),
-                keyboard: .default,
+                keyboard: keyboard,
                 enabled: !model.busy
             )
             .padding(12)

@@ -9,7 +9,7 @@ pub fn tray_rgba(size: u32) -> Vec<u8> {
 /// `desktop/make-icon.py`. Black pixels and clear gaps are enough at menu-bar
 /// size; a full-color tile of that mark is too small to read there. macOS
 /// tints a template image for the light and dark menu bar.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub fn menu_bar_rgba(size: u32) -> Vec<u8> {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     if size == 0 {
@@ -54,13 +54,13 @@ pub fn menu_bar_rgba(size: u32) -> Vec<u8> {
     rgba
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn cover(distance: f32, aa: f32) -> f32 {
     (0.5 - distance / aa).clamp(0.0, 1.0)
 }
 
 /// Signed distance to a rounded rectangle. Negative is inside, matching make-icon.py.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn round_box(px: f32, py: f32, left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> f32 {
     let cx = (left + right) / 2.0;
     let cy = (top + bottom) / 2.0;

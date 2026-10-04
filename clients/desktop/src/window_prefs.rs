@@ -1,5 +1,10 @@
-//! Whether closing the Mac window hides Drop or quits it.
-//! Stored next to the server address, not in the keychain.
+//! Whether closing the window hides Drop or quits it.
+//!
+//! On Mac the menu calls this "Close to menu bar". On Windows it is
+//! "Close to notification area". The file is `window.json` next to the server
+//! address, not the keychain. Missing or unreadable means on. Only an explicit
+//! false turns it off. The key stays `closeToMenuBar` so a Mac preference
+//! already on disk still loads.
 
 use std::fs;
 use std::path::PathBuf;
@@ -50,7 +55,6 @@ fn save(path: &std::path::Path, on: bool) -> std::io::Result<()> {
     fs::rename(tmp, path)
 }
 
-/// Missing or unreadable means on. Only an explicit false turns it off.
 fn parse(text: &str) -> bool {
     let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
     !compact.contains("\"closeToMenuBar\":false")

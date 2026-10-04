@@ -28,6 +28,15 @@ pub enum Command {
         username: String,
         material: Zeroizing<Vec<u8>>,
     },
+    StorePin {
+        pin: Zeroizing<String>,
+        epoch: u64,
+    },
+    UnlockPin {
+        server: String,
+        username: String,
+        pin: Zeroizing<String>,
+    },
     Shutdown {
         keep_session: bool,
     },
@@ -45,6 +54,9 @@ pub enum WorkerEvent {
     BiometricStored { epoch: u64 },
     BiometricCanceled { epoch: u64 },
     BiometricFailed { epoch: u64, message: String },
+    PinStored { epoch: u64 },
+    PinRejected,
+    PinFailed { message: String },
 }
 
 pub fn spawn(rx: Receiver<Command>, tx: Sender<WorkerEvent>) -> std::thread::JoinHandle<()> {
@@ -93,43 +105,59 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
             Command::Restore {
                 server,
                 username,
-                mut material,
-            } => {
-                if let Some(mut previous) = client.take() {
-                    previous.sign_out();
-                }
-                let decoded = match UnlockMaterial::decode(&material) {
-                    Ok(decoded) => decoded,
-                    Err(error) => {
-                        material.zeroize();
-                        let _ = tx.send(WorkerEvent::Error(error.to_string()));
-                        continue;
-                    }
-                };
-                material.zeroize();
-                if decoded.username != username {
-                    let _ = tx.send(WorkerEvent::Error("Enter your password.".into()));
+                material,
+            } => restore_material(&mut client, &server, &username, material, &tx),
+            Command::StorePin { mut pin, epoch } => {
+                let Some(current) = client.as_ref() else {
+                    pin.zeroize();
+                    let _ = tx.send(WorkerEvent::PinFailed {
+                        message: "Sign in with your password before turning this on.".into(),
+                    });
                     continue;
-                }
-                let _ = tx.send(WorkerEvent::Status("Unlocking…".into()));
-                match DropClient::connect(&server) {
-                    Ok(mut next) => match next.restore(decoded) {
-                        Ok(snapshot) => {
-                            client = Some(next);
-                            let _ = tx.send(WorkerEvent::Status(String::new()));
-                            let _ = tx.send(WorkerEvent::Snapshot(snapshot));
+                };
+                match current.unlock_material().and_then(|material| material.encode()) {
+                    Ok(bytes) => match crate::pin::store(pin.as_str(), &bytes) {
+                        Ok(()) => {
+                            pin.zeroize();
+                            let _ = tx.send(WorkerEvent::PinStored { epoch });
                         }
-                        Err(error) => {
-                            let _ = tx.send(WorkerEvent::Status(String::new()));
-                            let _ = tx.send(WorkerEvent::Error(error.to_string()));
+                        Err(crate::pin::PinError::Failed(message)) => {
+                            pin.zeroize();
+                            let _ = tx.send(WorkerEvent::PinFailed { message });
+                        }
+                        Err(crate::pin::PinError::Wrong) => {
+                            pin.zeroize();
+                            let _ = tx.send(WorkerEvent::PinFailed {
+                                message: "Couldn't store the PIN.".into(),
+                            });
                         }
                     },
                     Err(error) => {
-                        let _ = tx.send(WorkerEvent::Status(String::new()));
-                        let _ = tx.send(WorkerEvent::Error(error.to_string()));
+                        pin.zeroize();
+                        let _ = tx.send(WorkerEvent::PinFailed {
+                            message: error.to_string(),
+                        });
                     }
                 }
             }
+            Command::UnlockPin {
+                server,
+                username,
+                mut pin,
+            } => match crate::pin::open(pin.as_str()) {
+                Ok(material) => {
+                    pin.zeroize();
+                    restore_material(&mut client, &server, &username, material, &tx);
+                }
+                Err(crate::pin::PinError::Wrong) => {
+                    pin.zeroize();
+                    let _ = tx.send(WorkerEvent::PinRejected);
+                }
+                Err(crate::pin::PinError::Failed(message)) => {
+                    pin.zeroize();
+                    let _ = tx.send(WorkerEvent::PinFailed { message });
+                }
+            },
             Command::SignOut => {
                 if let Some(mut client) = client.take() {
                     client.sign_out();
@@ -274,6 +302,49 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
                 };
                 report(client.delete_item(&id), &tx);
             }
+        }
+    }
+}
+
+fn restore_material(
+    client: &mut Option<DropClient>,
+    server: &str,
+    username: &str,
+    mut material: Zeroizing<Vec<u8>>,
+    tx: &Sender<WorkerEvent>,
+) {
+    if let Some(mut previous) = client.take() {
+        previous.sign_out();
+    }
+    let decoded = match UnlockMaterial::decode(&material) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            material.zeroize();
+            let _ = tx.send(WorkerEvent::Error(error.to_string()));
+            return;
+        }
+    };
+    material.zeroize();
+    if decoded.username != username {
+        let _ = tx.send(WorkerEvent::Error("Enter your password.".into()));
+        return;
+    }
+    let _ = tx.send(WorkerEvent::Status("Unlocking…".into()));
+    match DropClient::connect(server) {
+        Ok(mut next) => match next.restore(decoded) {
+            Ok(snapshot) => {
+                *client = Some(next);
+                let _ = tx.send(WorkerEvent::Status(String::new()));
+                let _ = tx.send(WorkerEvent::Snapshot(snapshot));
+            }
+            Err(error) => {
+                let _ = tx.send(WorkerEvent::Status(String::new()));
+                let _ = tx.send(WorkerEvent::Error(error.to_string()));
+            }
+        },
+        Err(error) => {
+            let _ = tx.send(WorkerEvent::Status(String::new()));
+            let _ = tx.send(WorkerEvent::Error(error.to_string()));
         }
     }
 }

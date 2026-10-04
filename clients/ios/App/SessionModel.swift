@@ -21,6 +21,9 @@ final class SessionModel: ObservableObject {
     @Published var biometricsOn = false
     @Published var biometryAvailable = false
     @Published var biometryLabel = "Unlock with Face ID"
+    @Published var pinOn = false
+    @Published var pinSetup = false
+    @Published var pinEntry = ""
     @Published var settingsError = ""
     @Published var settingsStatus = ""
     @Published var settingsBusy = ""
@@ -42,6 +45,7 @@ final class SessionModel: ObservableObject {
         biometryAvailable = kind != .none
         biometryLabel = kind.label
         biometricsOn = BiometricStore.enrolled()
+        pinOn = PinStore.enrolled()
     }
 
     func signIn() {
@@ -82,6 +86,10 @@ final class SessionModel: ObservableObject {
         biometricTicket += 1
         BiometricStore.delete()
         biometricsOn = false
+        PinStore.delete()
+        pinOn = false
+        pinSetup = false
+        pinEntry = ""
         settingsError = ""
         settingsStatus = ""
         settingsBusy = ""
@@ -306,7 +314,7 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    func changePassword(current: String, next: String, confirm: String) {
+    func changePassword(current: String, next: String, confirm: String, pin: String) {
         settingsError = ""
         settingsStatus = ""
         if current.isEmpty {
@@ -328,12 +336,22 @@ final class SessionModel: ObservableObject {
                 let snapshot = try client.changePassword(current: current, next: next) { message in
                     DispatchQueue.main.async { self?.settingsBusy = message }
                 }
+                let hadPin = PinStore.enrolled()
+                let pinKept = hadPin ? Self.rewriteStoredPin(client: client, pin: pin) : true
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.show(snapshot, status: "")
                     self.settingsBusy = ""
                     self.settingsError = ""
-                    self.settingsStatus = "Password changed. Other signed-in devices need the new password."
+                    var note = "Password changed. Other signed-in devices need the new password."
+                    if hadPin && !pinKept {
+                        note += " PIN unlock is off until you set it again."
+                        self.pinOn = false
+                        self.pinSetup = false
+                    } else if hadPin {
+                        self.pinOn = true
+                    }
+                    self.settingsStatus = note
                     self.passwordChangeDone += 1
                     if self.biometricsOn {
                         self.refreshStoredUnlock(ticket: self.biometricTicket, dropStaleOnFailure: true)
@@ -372,6 +390,120 @@ final class SessionModel: ObservableObject {
         biometricsOn = true
         error = ""
         refreshStoredUnlock(ticket: biometricTicket)
+    }
+
+    func setPin(_ enabled: Bool) {
+        if !enabled {
+            PinStore.delete()
+            pinOn = false
+            pinSetup = false
+            return
+        }
+        guard account != nil else {
+            error = "Sign in with your password before turning this on."
+            pinSetup = false
+            return
+        }
+        pinSetup = true
+        settingsError = ""
+    }
+
+    func savePin(pin: String, confirm: String) {
+        settingsError = ""
+        settingsStatus = ""
+        if let problem = DropPin.rejection(pin, confirm: confirm) {
+            settingsError = problem
+            return
+        }
+        guard let client else {
+            settingsError = DropError.locked.text
+            return
+        }
+        busy = true
+        settingsBusy = "Saving PIN…"
+        work.async { [weak self] in
+            var secret = Data()
+            defer { wipe(&secret) }
+            let saved: Bool
+            do {
+                secret = try client.exportUnlock()
+                let wrapped = try DropPin.wrap(pin: pin, secret: Array(secret))
+                saved = PinStore.save(Data(wrapped))
+            } catch {
+                saved = false
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.busy = false
+                self.settingsBusy = ""
+                if saved, self.account != nil {
+                    self.pinOn = true
+                    self.pinSetup = false
+                } else {
+                    if self.account == nil {
+                        PinStore.delete()
+                    }
+                    self.pinOn = PinStore.enrolled()
+                    self.settingsError = "Couldn't store the PIN."
+                }
+            }
+        }
+    }
+
+    func unlockWithPin() {
+        guard pinOn, !busy else { return }
+        let pin = pinEntry
+        pinEntry = ""
+        if let problem = DropPin.rejection(pin, confirm: nil) {
+            error = problem
+            return
+        }
+        let server = self.server.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = self.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        busy = true
+        error = ""
+        status = "Unlocking…"
+        http = server.hasPrefix("http://")
+        work.async { [weak self] in
+            guard let stored = PinStore.load() else {
+                DispatchQueue.main.async {
+                    self?.pinOn = false
+                    self?.error = "PIN unlock is off."
+                    self?.busy = false
+                    self?.status = ""
+                }
+                return
+            }
+            do {
+                let plain = try DropPin.unwrap(pin: pin, blob: Array(stored))
+                var data = Data(plain)
+                defer { wipe(&data) }
+                let decoded = try UnlockBlob.decode(data)
+                var saved = decoded.server
+                while saved.hasSuffix("/") { saved.removeLast() }
+                var current = server
+                while current.hasSuffix("/") { current.removeLast() }
+                guard saved == current, decoded.username == username else {
+                    throw DropError.message("Enter your password.")
+                }
+                let next = try DropClient(server: server)
+                let snapshot = try next.restore(data)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.client = next
+                    self.show(snapshot, status: "")
+                    self.startRefresh()
+                    self.drainInbox()
+                }
+            } catch {
+                let text = (error as? DropError)?.text ?? "That PIN is wrong."
+                DispatchQueue.main.async {
+                    self?.error = text
+                    self?.busy = false
+                    self?.status = ""
+                }
+            }
+        }
     }
 
     func finishShare() {
@@ -468,6 +600,37 @@ final class SessionModel: ObservableObject {
                 self?.status = ""
             }
         }
+    }
+
+    /// Re-wrap the new content key with the same PIN. A blank or wrong PIN turns PIN unlock off.
+    private static func rewriteStoredPin(client: DropClient, pin: String) -> Bool {
+        guard DropPin.rejection(pin, confirm: nil) == nil, let stored = PinStore.load() else {
+            PinStore.delete()
+            return false
+        }
+        var openedBytes = (try? DropPin.unwrap(pin: pin, blob: Array(stored))) ?? []
+        var plain = Data(openedBytes)
+        for index in openedBytes.indices {
+            openedBytes[index] = 0
+        }
+        openedBytes.removeAll()
+        let opened = !plain.isEmpty
+        wipe(&plain)
+        guard opened else {
+            PinStore.delete()
+            return false
+        }
+        guard let exported = try? client.exportUnlock(), !exported.isEmpty else {
+            PinStore.delete()
+            return false
+        }
+        var secret = exported
+        defer { wipe(&secret) }
+        guard let wrapped = try? DropPin.wrap(pin: pin, secret: Array(secret)), PinStore.save(Data(wrapped)) else {
+            PinStore.delete()
+            return false
+        }
+        return true
     }
 
     private func refreshStoredUnlock(ticket: Int, dropStaleOnFailure: Bool = false) {

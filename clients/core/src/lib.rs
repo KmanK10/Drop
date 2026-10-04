@@ -12,6 +12,7 @@ mod error;
 mod format;
 mod item;
 mod kind;
+mod pin;
 mod settings;
 mod unlock;
 
@@ -25,6 +26,7 @@ pub use error::DropError;
 pub use format::{format_bytes, format_when, retention_label};
 pub use item::{decode_item, encode_item, safe_download_name, ItemKind, ItemPlain};
 pub use kind::{clipboard_file_kind, ClipboardKind};
+pub use pin::{pin_rejection, unwrap_pin, wrap_pin};
 pub use settings::{default_config_dir, load_settings, save_settings, Settings, DEFAULT_SERVER};
 pub use unlock::UnlockMaterial;
 

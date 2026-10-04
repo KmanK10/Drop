@@ -33,6 +33,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    MF_CHECKED,
     DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
     SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow, TrackPopupMenu,
     TranslateMessage, UnhookWindowsHookEx, DestroyIcon, HHOOK, HICON, HMENU, ICONINFO, LWA_ALPHA, MB_ICONINFORMATION,
@@ -50,8 +51,11 @@ const CALLBACK: u32 = WM_APP + 1;
 const TIP_MSG: u32 = WM_APP + 2;
 const QUIT_MSG: u32 = WM_APP + 3;
 const ID_OPEN: usize = 1;
-const ID_SIGNOUT: usize = 2;
-const ID_QUIT: usize = 3;
+const ID_HELLO: usize = 2;
+const ID_PIN: usize = 3;
+const ID_SIGNOUT: usize = 4;
+const ID_CLOSE: usize = 5;
+const ID_QUIT: usize = 6;
 
 /// Window and icon handles are thread-safe values. The tray thread creates them
 /// and the UI thread only posts messages to the window.
@@ -218,7 +222,7 @@ fn tray_thread(tx: Sender<TrayAction>, wake: impl Fn() + Send + 'static, ready: 
         // Keep the COM object alive for the thread.
         std::mem::forget(target);
 
-        let rgba = icon::tray_rgba(32);
+        let rgba = clipboard_icon(32);
         let icon = icon_from_rgba(32, 32, &rgba).map_err(|error| error.to_string())?;
         let mut data = notify_data(message, icon, "Drop — drop a file here");
         if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
@@ -330,11 +334,36 @@ fn on_icon_event(event: u32) {
     }
 }
 
+fn clipboard_icon(size: u32) -> Vec<u8> {
+    let mut rgba = icon::menu_bar_rgba(size);
+    for pixel in rgba.chunks_mut(4) {
+        if pixel[3] == 0 {
+            continue;
+        }
+        pixel[0] = 0x1d;
+        pixel[1] = 0x68;
+        pixel[2] = 0x43;
+    }
+    rgba
+}
+
 fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
         let _ = AppendMenuW(menu, MF_STRING, ID_OPEN, w!("Open"));
+        if crate::biometric::available() {
+            let flags = if crate::biometric::enrolled() { MF_STRING | MF_CHECKED } else { MF_STRING };
+            let _ = AppendMenuW(menu, flags, ID_HELLO, w!("Windows Hello"));
+        }
+        let pin_flags = if crate::pin::enrolled() { MF_STRING | MF_CHECKED } else { MF_STRING };
+        let _ = AppendMenuW(menu, pin_flags, ID_PIN, w!("PIN"));
         let _ = AppendMenuW(menu, MF_STRING, ID_SIGNOUT, w!("Sign out"));
+        let close_flags = if crate::window_prefs::close_to_menu_bar() {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        let _ = AppendMenuW(menu, close_flags, ID_CLOSE, w!("Close to notification area"));
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, w!("Quit"));
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
@@ -352,7 +381,13 @@ fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
         let _ = DestroyMenu(menu);
         match picked.0 as usize {
             ID_OPEN => Some(TrayAction::Open),
+            ID_HELLO => Some(TrayAction::SetBiometric(!crate::biometric::enrolled())),
+            ID_PIN => Some(TrayAction::SetPin(!crate::pin::enrolled())),
             ID_SIGNOUT => Some(TrayAction::SignOut),
+            ID_CLOSE => {
+                crate::window_prefs::toggle();
+                None
+            }
             ID_QUIT => Some(TrayAction::Quit),
             _ => None,
         }

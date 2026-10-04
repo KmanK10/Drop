@@ -28,6 +28,22 @@ final class Vectors: XCTestCase {
         XCTAssertEqual(DropPassword.rejection("short", confirm: "short"), "Use at least 10 characters.")
     }
 
+    func testPinRulesAreFourToEightDigits() throws {
+        XCTAssertEqual(DropPin.rejection("123", confirm: nil), "Use 4 to 8 digits.")
+        XCTAssertEqual(DropPin.rejection("123456789", confirm: nil), "Use 4 to 8 digits.")
+        XCTAssertEqual(DropPin.rejection("12ab", confirm: nil), "Use 4 to 8 digits.")
+        XCTAssertEqual(DropPin.rejection("1234", confirm: "9999"), "Those PINs don't match.")
+        XCTAssertNil(DropPin.rejection("1234", confirm: "1234"))
+        XCTAssertNil(DropPin.rejection("\u{FF11}\u{FF12}\u{FF13}\u{FF14}", confirm: "1234"))
+        let secret = Array("pin-secret-marker-not-the-password".utf8)
+        let wrapped = try DropPin.wrap(pin: "1234", secret: secret)
+        XCTAssertEqual(Array(wrapped.prefix(4)), Array("DRPP".utf8))
+        XCTAssertFalse(containsBytes(wrapped, Array("1234".utf8)))
+        XCTAssertFalse(containsBytes(wrapped, secret))
+        XCTAssertEqual(try DropPin.unwrap(pin: "1234", blob: wrapped), secret)
+        XCTAssertThrowsError(try DropPin.unwrap(pin: "9999", blob: wrapped))
+    }
+
     func testRegistrationFieldsOmitTheContentKey() throws {
         let salt = [UInt8](repeating: 1, count: 16)
         let verifier = [UInt8](repeating: 2, count: 32)
@@ -155,6 +171,16 @@ final class Vectors: XCTestCase {
             let end = value.index(start, offsetBy: 2)
             return UInt8(value[start..<end], radix: 16)!
         }
+    }
+
+    private func containsBytes(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
+        guard !needle.isEmpty, needle.count <= haystack.count else { return false }
+        for start in 0...(haystack.count - needle.count) {
+            if Array(haystack[start..<(start + needle.count)]) == needle {
+                return true
+            }
+        }
+        return false
     }
 
     private func hexEncode(_ bytes: [UInt8]) -> String {

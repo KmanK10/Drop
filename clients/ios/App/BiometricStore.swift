@@ -140,3 +140,58 @@ func wipe(_ data: inout Data) {
     data.resetBytes(in: 0..<data.count)
     data.removeAll()
 }
+
+/// PIN wrap in the app keychain. No biometry flag, and not the app-group item.
+enum PinStore {
+    private static let service = "com.kiefermenard.drop.pin"
+    private static let account = "unlock"
+
+    static func enrolled() -> Bool {
+        var query = baseQuery()
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
+    static func save(_ data: Data) -> Bool {
+        var add = baseQuery()
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        switch SecItemAdd(add as CFDictionary, nil) {
+        case errSecSuccess:
+            return true
+        case errSecDuplicateItem:
+            let changes = [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            ] as CFDictionary
+            return SecItemUpdate(baseQuery() as CFDictionary, changes) == errSecSuccess
+        default:
+            return false
+        }
+    }
+
+    static func load() -> Data? {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let item else {
+            return nil
+        }
+        let data = item as? Data ?? Data()
+        return data.isEmpty ? nil : data
+    }
+
+    static func delete() {
+        SecItemDelete(baseQuery() as CFDictionary)
+    }
+
+    private static func baseQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+}
