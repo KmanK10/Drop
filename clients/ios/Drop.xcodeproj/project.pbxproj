@@ -11,6 +11,7 @@
 		D10000000000000000000041 /* SessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000021 /* SessionModel.swift */; };
 		D10000000000000000000042 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000022 /* RootView.swift */; };
 		D10000000000000000000043 /* Inbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000029 /* Inbox.swift */; };
+		D10000000000000000000049 /* BiometricStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000030 /* BiometricStore.swift */; };
 		D10000000000000000000044 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000025 /* Assets.xcassets */; };
 		D10000000000000000000045 /* DropKit in Frameworks */ = {isa = PBXBuildFile; productRef = D10000000000000000000007 /* DropKit */; };
 		D10000000000000000000046 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000026 /* ShareViewController.swift */; };
@@ -55,6 +56,7 @@
 		D10000000000000000000027 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		D10000000000000000000028 /* Share.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Share.entitlements; sourceTree = "<group>"; };
 		D10000000000000000000029 /* Inbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Inbox.swift; sourceTree = "<group>"; };
+		D10000000000000000000030 /* BiometricStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -92,6 +94,7 @@
 				D10000000000000000000020 /* DropApp.swift */,
 				D10000000000000000000021 /* SessionModel.swift */,
 				D10000000000000000000022 /* RootView.swift */,
+				D10000000000000000000030 /* BiometricStore.swift */,
 				D10000000000000000000025 /* Assets.xcassets */,
 				D10000000000000000000023 /* Info.plist */,
 				D10000000000000000000024 /* Drop.entitlements */,
@@ -236,6 +239,7 @@
 				D10000000000000000000040 /* DropApp.swift in Sources */,
 				D10000000000000000000041 /* SessionModel.swift in Sources */,
 				D10000000000000000000042 /* RootView.swift in Sources */,
+				D10000000000000000000049 /* BiometricStore.swift in Sources */,
 				D10000000000000000000043 /* Inbox.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

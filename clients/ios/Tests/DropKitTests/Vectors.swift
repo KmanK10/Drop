@@ -83,6 +83,17 @@ final class Vectors: XCTestCase {
         try FileManager.default.removeItem(at: dir)
     }
 
+    func testUnlockBlobRoundTripsWithoutThePassword() throws {
+        let key = [UInt8](repeating: 7, count: 32)
+        let blob = UnlockBlob(contentKey: key, server: "https://drop.example", username: "ada", cookie: "session-token")
+        let data = try blob.encode()
+        let decoded = try UnlockBlob.decode(data)
+        XCTAssertEqual(decoded, blob)
+        XCTAssertEqual(Array(data.prefix(4)), Array("DRPK".utf8))
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("password"))
+        XCTAssertThrowsError(try UnlockBlob.decode(data.dropLast()))
+    }
+
     func testCryptoKitCombinedLayoutIsNonceCiphertextTag() throws {
         let key = SymmetricKey(data: Data(hexDecode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")))
         let blob = Data(hexDecode("000102030405060708090a0b2370b96be88ea762a022ffeed282551bb2c5e283ae92bb8b612327f9d0e65adde0"))

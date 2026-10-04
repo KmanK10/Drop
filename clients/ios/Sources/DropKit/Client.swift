@@ -37,7 +37,8 @@ public struct DropDownload: Sendable {
 
 /// Talks to an existing Drop server. The session cookie lives in an ephemeral
 /// URLSession. The content key lives in this object until `signOut()` or the
-/// process ends. Neither is written to disk, Keychain, or UserDefaults.
+/// process ends. This type does not write either one. The app may copy an
+/// unlock blob into the keychain when biometric unlock is turned on.
 public final class DropClient: @unchecked Sendable {
     private let lock = NSLock()
     private let session: URLSession
@@ -129,6 +130,80 @@ public final class DropClient: @unchecked Sendable {
         wipe()
         logoutRequest()
         clearCookies()
+    }
+
+    /// Content key and session cookie for the keychain. The password is not included.
+    public func exportUnlock() throws -> Data {
+        lock.lock()
+        let key = contentKey
+        let name = account?.username ?? ""
+        lock.unlock()
+        guard let key, key.count == 32, !name.isEmpty else { throw DropError.locked }
+        guard let cookie = sessionCookieValue(), !cookie.isEmpty else { throw DropError.sessionLost }
+        var server = base.absoluteString
+        while server.hasSuffix("/") {
+            server.removeLast()
+        }
+        return try UnlockBlob(contentKey: key, server: server, username: name, cookie: cookie).encode()
+    }
+
+    /// Install a biometric unlock blob and load the clipboard. Failure leaves
+    /// this client locked.
+    public func restore(_ material: Data) throws -> DropSnapshot {
+        let decoded = try UnlockBlob.decode(material)
+        var current = base.absoluteString
+        while current.hasSuffix("/") {
+            current.removeLast()
+        }
+        var saved = decoded.server
+        while saved.hasSuffix("/") {
+            saved.removeLast()
+        }
+        guard saved == current else { throw DropError.message("Enter your password.") }
+        wipe()
+        clearCookies()
+        guard let host = base.host, !decoded.cookie.isEmpty else { throw DropError.badServer }
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .name: "drop_session",
+            .value: decoded.cookie,
+            .domain: host,
+            .path: "/",
+        ]
+        if base.scheme == "https" {
+            properties[.secure] = "TRUE"
+        }
+        guard let cookie = HTTPCookie(properties: properties) else { throw DropError.sessionLost }
+        session.configuration.httpCookieStorage?.setCookie(cookie)
+        let me: [String: Any]
+        do {
+            me = try getJSON("/api/me")
+        } catch {
+            clearCookies()
+            throw error
+        }
+        guard let checkText = me["keyCheck"] as? String, let check = Bytes.fromB64url(checkText),
+              DropCrypto.verifyKeyCheck(contentKey: decoded.contentKey, blob: check)
+        else {
+            clearCookies()
+            throw DropError.keyCheck
+        }
+        let accountName = me["username"] as? String ?? ""
+        guard accountName == decoded.username else {
+            clearCookies()
+            throw DropError.message("Enter your password.")
+        }
+        let ttl = fetchTTL()
+        lock.lock()
+        contentKey = decoded.contentKey
+        account = accountFrom(me, ttl: ttl)
+        lock.unlock()
+        do {
+            return try refresh()
+        } catch {
+            wipe()
+            clearCookies()
+            throw error
+        }
     }
 
     public func refresh() throws -> DropSnapshot {
@@ -410,6 +485,10 @@ public final class DropClient: @unchecked Sendable {
 
     private func clearCookies() {
         session.configuration.httpCookieStorage?.removeCookies(since: Date.distantPast)
+    }
+
+    private func sessionCookieValue() -> String? {
+        session.configuration.httpCookieStorage?.cookies?.first { $0.name == "drop_session" }?.value
     }
 
     private func snapshotLocked() throws -> DropSnapshot {

@@ -3,5 +3,8 @@ fn main() {
     if target.contains("apple-darwin") {
         println!("cargo:rustc-link-lib=framework=AppKit");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Security");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+        println!("cargo:rustc-link-lib=framework=LocalAuthentication");
     }
 }

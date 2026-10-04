@@ -13,8 +13,10 @@ use crate::error::DropError;
 use crate::format::{self, format_bytes, format_when, text_preview};
 use crate::item::{self, safe_download_name, ItemKind, ItemPlain};
 use crate::kind::{self, ClipboardKind};
+use crate::unlock::UnlockMaterial;
 
 const CSRF: &str = "x-drop-request";
+const SESSION_COOKIE: &str = "drop_session";
 const TTL_DEFAULT_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone)]
@@ -81,6 +83,31 @@ impl MemoryJar {
             wipe_string(&mut cookie.value);
         }
         guard.clear();
+    }
+
+    fn session_cookie(&self, host: &str) -> Option<Zeroizing<String>> {
+        let guard = self.cookies.lock().expect("cookie jar");
+        guard
+            .iter()
+            .find(|cookie| cookie.host == host && cookie.name == SESSION_COOKIE && !cookie.value.is_empty())
+            .map(|cookie| Zeroizing::new(cookie.value.clone()))
+    }
+
+    fn install_session_cookie(&self, host: &str, value: &str, secure: bool) {
+        let mut guard = self.cookies.lock().expect("cookie jar");
+        for cookie in guard.iter_mut() {
+            if cookie.name == SESSION_COOKIE && cookie.host == host {
+                wipe_string(&mut cookie.value);
+            }
+        }
+        guard.retain(|cookie| !(cookie.name == SESSION_COOKIE && cookie.host == host));
+        guard.push(StoredCookie {
+            name: SESSION_COOKIE.to_string(),
+            value: value.to_string(),
+            host: host.to_string(),
+            path: "/".into(),
+            secure,
+        });
     }
 }
 
@@ -248,6 +275,85 @@ impl DropClient {
         self.zero_local();
         let _ = self.logout_request();
         self.jar.clear();
+    }
+
+    /// The content key and session cookie currently in memory. The password is
+    /// not included. The caller stores this only in a biometric keychain.
+    pub fn unlock_material(&self) -> Result<UnlockMaterial, DropError> {
+        let content_key = self.content_key.clone().ok_or(DropError::Locked)?;
+        let username = self
+            .account
+            .as_ref()
+            .map(|account| account.username.clone())
+            .filter(|name| !name.is_empty())
+            .ok_or(DropError::Locked)?;
+        let host = self.base.host_str().ok_or(DropError::BadServer)?;
+        let cookie = self.jar.session_cookie(host).ok_or(DropError::SessionLost)?;
+        Ok(UnlockMaterial {
+            content_key,
+            server_url: trim_server(self.base.as_str()),
+            username,
+            cookie,
+        })
+    }
+
+    /// Install a biometric unlock blob and load the clipboard. A mismatch or a
+    /// dead session leaves the client locked so the password form can be used.
+    pub fn restore(&mut self, mut material: UnlockMaterial) -> Result<Snapshot, DropError> {
+        if trim_server(&material.server_url) != trim_server(self.base.as_str()) {
+            return Err(DropError::Message("Enter your password.".into()));
+        }
+        self.zero_local();
+        self.jar.clear();
+        let host = self.base.host_str().unwrap_or("").to_string();
+        if host.is_empty() {
+            return Err(DropError::BadServer);
+        }
+        self.jar
+            .install_session_cookie(&host, material.cookie.as_str(), self.base.scheme() == "https");
+        material.cookie.zeroize();
+        let me = match self.get_json("/api/me") {
+            Ok(me) => me,
+            Err(error) => {
+                self.jar.clear();
+                return Err(error);
+            }
+        };
+        let key_check = match me
+            .get("keyCheck")
+            .and_then(|value| value.as_str())
+            .ok_or(DropError::KeyCheck)
+            .and_then(|text| b64url_to_bytes(text).map_err(|_| DropError::KeyCheck))
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.jar.clear();
+                return Err(error);
+            }
+        };
+        if !verify_key_check(&material.content_key, &key_check).unwrap_or(false) {
+            self.jar.clear();
+            return Err(DropError::KeyCheck);
+        }
+        let account_name = me.get("username").and_then(|value| value.as_str()).unwrap_or("");
+        if account_name != material.username {
+            self.jar.clear();
+            return Err(DropError::Message("Enter your password.".into()));
+        }
+        let ttl_ms = self.fetch_ttl();
+        self.content_key = Some(std::mem::replace(
+            &mut material.content_key,
+            Zeroizing::new([0u8; 32]),
+        ));
+        self.account = Some(account_from_me(&me, ttl_ms)?);
+        match self.refresh() {
+            Ok(snapshot) => Ok(snapshot),
+            Err(error) => {
+                self.zero_local();
+                self.jar.clear();
+                Err(error)
+            }
+        }
     }
 
     pub fn refresh(&mut self) -> Result<Snapshot, DropError> {
@@ -570,6 +676,10 @@ impl DropClient {
         let path = path.trim_start_matches('/');
         self.base.join(path).map_err(|_| DropError::BadServer)
     }
+}
+
+fn trim_server(input: &str) -> String {
+    input.trim().trim_end_matches('/').to_string()
 }
 
 pub fn parse_server(input: &str) -> Result<Url, DropError> {

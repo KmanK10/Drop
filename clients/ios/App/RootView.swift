@@ -63,6 +63,13 @@ private struct SignInView: View {
                         .foregroundStyle(palette.muted)
                 }
                 Notice()
+                if model.biometricsOn {
+                    Button(model.busy ? "Unlocking…" : model.biometryLabel) {
+                        model.unlockWithBiometrics()
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(model.busy)
+                }
                 Button(model.busy ? "Signing in…" : "Sign in") {
                     model.signIn()
                 }
@@ -74,6 +81,7 @@ private struct SignInView: View {
             }
         }
         .scrollDismissesKeyboard(.interactively)
+        .onAppear { model.offerBiometrics() }
     }
 
     private func field(_ title: String, text: Binding<String>, secure: Bool, placeholder: String? = nil) -> some View {
@@ -105,7 +113,6 @@ private enum AddChoice {
 private struct ClipboardView: View {
     @EnvironmentObject private var model: SessionModel
     @Environment(\.colorScheme) private var colorScheme
-    @State private var offeringAdd = false
     @State private var takingPhoto = false
     @State private var choosingPhoto = false
     @State private var pickingFile = false
@@ -143,15 +150,16 @@ private struct ClipboardView: View {
                     .disabled(model.busy)
                 Button("Paste") { model.paste() }
                     .disabled(model.busy)
-                Button {
-                    offeringAdd = true
+                Menu {
+                    Button("Take a photo") { presentAdd(.camera) }
+                    Button("Choose a photo") { presentAdd(.photo) }
+                    Button("Choose a file") { presentAdd(.file) }
                 } label: {
-                    Image(systemName: "plus")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 44, height: 36)
-                        .contentShape(Rectangle())
+                    PlusMark(ink: palette.ink, label: "Add")
                 }
-                .accessibilityLabel("Add")
+                .menuOrder(.fixed)
+                .buttonStyle(.plain)
+                .fixedSize()
                 .disabled(model.busy)
             }
             .foregroundStyle(palette.ink)
@@ -168,14 +176,22 @@ private struct ClipboardView: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
-            Text("Drop stays unlocked until you close the app. Closing it forgets the key.")
+            if model.biometryAvailable {
+                Toggle(model.biometryLabel, isOn: Binding(
+                    get: { model.biometricsOn },
+                    set: { model.setBiometrics($0) }
+                ))
+                .disabled(model.busy)
+                .foregroundStyle(palette.ink)
+                Text("Off until you turn this on after signing in. Drop stores the content key in the keychain, not the password. Sign out removes it.")
+                    .font(.caption)
+                    .foregroundStyle(palette.muted)
+            }
+            Text(model.biometricsOn
+                ? "Drop stays unlocked until you close the app. Sign out removes the keychain item."
+                : "Drop stays unlocked until you close the app. Closing it forgets the key.")
                 .font(.caption)
                 .foregroundStyle(palette.muted)
-        }
-        .confirmationDialog("Add", isPresented: $offeringAdd, titleVisibility: .hidden) {
-            Button("Take a photo") { presentAdd(.camera) }
-            Button("Choose a photo") { presentAdd(.photo) }
-            Button("Choose a file") { presentAdd(.file) }
         }
         .fullScreenCover(isPresented: $takingPhoto) {
             CameraPicker(
@@ -202,6 +218,20 @@ private struct ClipboardView: View {
                 model.uploadPicked(urls)
             }
         }
+        .fileExporter(
+            isPresented: Binding(
+                get: { model.exportData != nil },
+                set: { if !$0 { model.exportData = nil } }
+            ),
+            document: model.exportData.map(SavedFile.init(data:)),
+            contentType: .data,
+            defaultFilename: model.exportName
+        ) { result in
+            if case .failure = result {
+                model.error = "Couldn't save that file."
+            }
+            model.exportData = nil
+        }
         .sheet(isPresented: Binding(
             get: { model.shareURL != nil },
             set: { if !$0 { model.finishShare() } }
@@ -212,8 +242,8 @@ private struct ClipboardView: View {
         }
     }
 
-    /// The action sheet has to finish dismissing before the camera, photo
-    /// library, or file picker can be presented.
+    /// The menu has to finish dismissing before the camera, photo library, or
+    /// file picker can be presented.
     private func presentAdd(_ choice: AddChoice) {
         DispatchQueue.main.async {
             switch choice {
@@ -354,18 +384,22 @@ private struct ItemCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(item.title).font(.body.weight(.semibold)).foregroundStyle(palette.ink)
             Text(item.detail).font(.footnote).foregroundStyle(palette.muted)
-            HStack {
+            Menu {
                 if item.canCopy {
-                    Button("Copy") { model.copy(item) }.disabled(model.busy)
+                    Button("Copy") { model.copy(item) }
                 }
-                Button("Share") { model.download(item) }.disabled(model.busy)
-                Button(model.pendingDelete == item.id ? "Delete now" : "Delete") {
+                Button("Share") { model.download(item) }
+                Button("Download") { model.saveFile(item) }
+                Button(model.pendingDelete == item.id ? "Delete now" : "Delete", role: model.pendingDelete == item.id ? .destructive : nil) {
                     model.delete(item)
                 }
-                .disabled(model.busy)
+            } label: {
+                PlusMark(ink: palette.green, label: "Shortcuts")
             }
-            .font(.subheadline)
-            .foregroundStyle(palette.green)
+            .menuOrder(.fixed)
+            .buttonStyle(.plain)
+            .fixedSize()
+            .disabled(model.busy)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -421,6 +455,38 @@ private struct PrimaryButtonStyle: ButtonStyle {
             .padding(.vertical, 10)
             .background(palette.green.opacity(configuration.isPressed ? 0.85 : 1))
             .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct PlusMark: View {
+    var ink: Color
+    var label: String
+
+    var body: some View {
+        Image(systemName: "plus")
+            .font(.body.weight(.semibold))
+            .foregroundStyle(ink)
+            .frame(width: 36, height: 36)
+            .overlay(Circle().stroke(ink, lineWidth: 1.5))
+            .contentShape(Circle())
+            .accessibilityLabel(label)
+    }
+}
+
+private struct SavedFile: FileDocument {
+    static var readableContentTypes: [UTType] { [.data] }
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }
 

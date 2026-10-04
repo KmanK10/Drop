@@ -11,6 +11,7 @@ use eframe::egui::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::biometric::{self, BiometricError};
 use crate::icon;
 use crate::tray::{TrayAction, TrayPorts};
 use crate::worker::{self, Command, WorkerEvent};
@@ -131,7 +132,13 @@ struct DropApp {
     quit: bool,
     pending_delete: Option<String>,
     pending_drops: Vec<PathBuf>,
+    biometrics: bool,
+    biometric_available: bool,
+    tried_biometrics: bool,
+    refresh_biometrics: bool,
+    biometric_epoch: u64,
     tx: Sender<Command>,
+    ui_tx: Sender<WorkerEvent>,
     rx: Receiver<WorkerEvent>,
     worker: Option<std::thread::JoinHandle<()>>,
     tray: Option<TrayHandle>,
@@ -155,6 +162,7 @@ impl DropApp {
     fn new(settings: Settings, settings_path: PathBuf) -> Self {
         let (tx, worker_rx) = mpsc::channel();
         let (event_tx, rx) = mpsc::channel();
+        let ui_tx = event_tx.clone();
         let worker = worker::spawn(worker_rx, event_tx);
         Self {
             settings_path,
@@ -172,7 +180,13 @@ impl DropApp {
             quit: false,
             pending_delete: None,
             pending_drops: Vec::new(),
+            biometrics: biometric::enrolled(),
+            biometric_available: biometric::available(),
+            tried_biometrics: false,
+            refresh_biometrics: false,
+            biometric_epoch: 0,
             tx,
+            ui_tx,
             rx,
             worker: Some(worker),
             tray: None,
@@ -229,10 +243,7 @@ impl DropApp {
     fn on_tray(&mut self, ctx: &Context, action: TrayAction) {
         match action {
             TrayAction::Open => show_window(ctx),
-            TrayAction::SignOut => {
-                self.busy = true;
-                self.send(Command::SignOut);
-            }
+            TrayAction::SignOut => self.sign_out(),
             TrayAction::Quit => self.request_quit(ctx),
             TrayAction::Dropped(paths) => {
                 show_window(ctx);
@@ -257,6 +268,11 @@ impl DropApp {
                 self.busy = false;
                 self.error.clear();
                 self.update_tooltip();
+                if self.refresh_biometrics {
+                    self.refresh_biometrics = false;
+                    self.busy = true;
+                    self.send(Command::PrepareBiometric);
+                }
                 if !self.pending_drops.is_empty() {
                     let paths = std::mem::take(&mut self.pending_drops);
                     self.busy = true;
@@ -270,10 +286,59 @@ impl DropApp {
                 }
             }
             WorkerEvent::Error(error) => {
+                self.refresh_biometrics = false;
+                self.biometrics = biometric::enrolled();
                 self.error = error;
                 self.busy = false;
                 self.status.clear();
                 show_window(ctx);
+            }
+            WorkerEvent::BiometricMaterial(bytes) => {
+                self.status = format!("{}…", biometric::label());
+                self.store_biometrics(bytes);
+            }
+            WorkerEvent::BiometricUnlocked { epoch, material } => {
+                if epoch != self.biometric_epoch {
+                    return;
+                }
+                let server = self.server.trim().to_string();
+                let username = self.username.trim().to_string();
+                self.http = server.starts_with("http://");
+                self.send(Command::Restore {
+                    server,
+                    username,
+                    material,
+                });
+            }
+            WorkerEvent::BiometricStored { epoch } => {
+                if epoch != self.biometric_epoch || self.account.is_none() {
+                    biometric::delete();
+                    if epoch == self.biometric_epoch {
+                        self.biometrics = false;
+                        self.busy = false;
+                    }
+                    return;
+                }
+                self.biometrics = true;
+                self.status = format!("{} is on.", biometric::label());
+                self.busy = false;
+            }
+            WorkerEvent::BiometricCanceled { epoch } => {
+                if epoch != self.biometric_epoch {
+                    return;
+                }
+                self.biometrics = biometric::enrolled();
+                self.busy = false;
+                self.status.clear();
+            }
+            WorkerEvent::BiometricFailed { epoch, message } => {
+                if epoch != self.biometric_epoch {
+                    return;
+                }
+                self.biometrics = biometric::enrolled();
+                self.error = message;
+                self.busy = false;
+                self.status.clear();
             }
             WorkerEvent::SignedOut => {
                 self.account = None;
@@ -308,8 +373,64 @@ impl DropApp {
 
     fn request_quit(&mut self, ctx: &Context) {
         self.quit = true;
-        let _ = self.tx.send(Command::Shutdown);
+        let _ = self.tx.send(Command::Shutdown {
+            keep_session: biometric::enrolled(),
+        });
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn sign_out(&mut self) {
+        self.biometric_epoch = self.biometric_epoch.wrapping_add(1);
+        biometric::delete();
+        self.biometrics = false;
+        self.refresh_biometrics = false;
+        self.busy = true;
+        self.send(Command::SignOut);
+    }
+
+    fn unlock_with_biometrics(&mut self) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.error.clear();
+        self.status = "Unlocking…".into();
+        let epoch = self.biometric_epoch;
+        let tx = self.ui_tx.clone();
+        // Touch ID and Windows Hello present a system dialog. Blocking the UI
+        // thread here keeps that dialog from appearing.
+        std::thread::spawn(move || match biometric::load() {
+            Ok(material) => {
+                let _ = tx.send(WorkerEvent::BiometricUnlocked { epoch, material });
+            }
+            Err(BiometricError::Canceled) => {
+                let _ = tx.send(WorkerEvent::BiometricCanceled { epoch });
+            }
+            Err(BiometricError::Failed(message)) => {
+                let _ = tx.send(WorkerEvent::BiometricFailed { epoch, message });
+            }
+        });
+    }
+
+    fn store_biometrics(&mut self, bytes: Zeroizing<Vec<u8>>) {
+        let epoch = self.biometric_epoch;
+        let tx = self.ui_tx.clone();
+        std::thread::spawn(move || {
+            let mut bytes = bytes;
+            let result = biometric::store(&bytes);
+            bytes.zeroize();
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(WorkerEvent::BiometricStored { epoch });
+                }
+                Err(BiometricError::Canceled) => {
+                    let _ = tx.send(WorkerEvent::BiometricCanceled { epoch });
+                }
+                Err(BiometricError::Failed(message)) => {
+                    let _ = tx.send(WorkerEvent::BiometricFailed { epoch, message });
+                }
+            }
+        });
     }
 
     fn update_tooltip(&self) {
@@ -344,6 +465,7 @@ impl DropApp {
         self.error.clear();
         self.status = "Signing in…".into();
         self.http = server.starts_with("http://");
+        self.refresh_biometrics = biometric::enrolled();
         self.send(Command::SignIn {
             server,
             username,
@@ -390,6 +512,13 @@ impl DropApp {
         if button.clicked() {
             self.submit_sign_in();
         }
+        if self.biometrics {
+            ui.add_space(8.0);
+            let unlock = ui.add_enabled(!self.busy, Button::new(biometric::label()));
+            if unlock.clicked() {
+                self.unlock_with_biometrics();
+            }
+        }
         ui.add_space(12.0);
         ui.label(
             RichText::new("Accounts are invite-only. Ask the person who runs this Drop for a username. Closing this window keeps Drop in the tray.")
@@ -410,8 +539,7 @@ impl DropApp {
                     self.request_quit(ctx);
                 }
                 if ui.add(Button::new("Sign out")).clicked() && !self.busy {
-                    self.busy = true;
-                    self.send(Command::SignOut);
+                    self.sign_out();
                 }
             });
         });
@@ -432,6 +560,28 @@ impl DropApp {
                 RichText::new("This connection is not HTTPS. Items are still encrypted before they are uploaded.")
                     .color(colors.muted)
                     .size(12.0),
+            );
+        }
+        if self.biometric_available {
+            let mut enabled = self.biometrics;
+            let response = ui.add_enabled(!self.busy, egui::Checkbox::new(&mut enabled, biometric::label()));
+            if response.changed() && !self.busy {
+                if enabled {
+                    self.biometrics = true;
+                    self.busy = true;
+                    self.error.clear();
+                    self.send(Command::PrepareBiometric);
+                } else {
+                    self.biometric_epoch = self.biometric_epoch.wrapping_add(1);
+                    biometric::delete();
+                    self.biometrics = false;
+                    self.status = format!("{} is off.", biometric::label());
+                }
+            }
+            ui.label(
+                RichText::new("Off until you turn this on after signing in with your password. The content key goes in the system keychain, not a file, and the password is not stored. Sign out removes it.")
+                    .color(colors.muted)
+                    .size(11.0),
             );
         }
         ui.add_space(8.0);
@@ -473,8 +623,13 @@ impl DropApp {
         } else {
             "notification area"
         };
+        let forget = if self.biometrics {
+            "Sign out removes the keychain item."
+        } else {
+            "Quit forgets the key."
+        };
         ui.label(
-            RichText::new(format!("Closing this window keeps Drop in the {place}. Quit to forget the key."))
+            RichText::new(format!("Closing this window keeps Drop in the {place}. {forget}"))
                 .color(colors.muted)
                 .size(11.0),
         );
@@ -565,6 +720,10 @@ impl DropApp {
 impl eframe::App for DropApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.pump(ctx);
+        if self.account.is_none() && !self.tried_biometrics && self.biometrics && !self.busy {
+            self.tried_biometrics = true;
+            self.unlock_with_biometrics();
+        }
         if ctx.input(|input| input.viewport().close_requested()) && !self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -584,7 +743,9 @@ impl eframe::App for DropApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let _ = self.tx.send(Command::Shutdown);
+        let _ = self.tx.send(Command::Shutdown {
+            keep_session: biometric::enrolled(),
+        });
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

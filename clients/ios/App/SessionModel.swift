@@ -16,7 +16,15 @@ final class SessionModel: ObservableObject {
     @Published var busy = false
     @Published var http = false
     @Published var shareURL: URL?
+    @Published var exportData: Data?
+    @Published var exportName = "file"
     @Published var pendingDelete: String?
+    @Published var biometricsOn = false
+    @Published var biometryAvailable = false
+    @Published var biometryLabel = "Unlock with Face ID"
+
+    private var triedBiometrics = false
+    private var biometricTicket = 0
 
     private var client: DropClient?
     private let work = DispatchQueue(label: "com.kiefermenard.drop.session")
@@ -27,6 +35,10 @@ final class SessionModel: ObservableObject {
         server = settings.serverURL
         username = settings.username
         http = server.hasPrefix("http://")
+        let kind = BiometricStore.kind()
+        biometryAvailable = kind != .none
+        biometryLabel = kind.label
+        biometricsOn = BiometricStore.enrolled()
     }
 
     func signIn() {
@@ -53,6 +65,9 @@ final class SessionModel: ObservableObject {
                     self.show(snapshot, status: "")
                     self.startRefresh()
                     self.drainInbox()
+                    if BiometricStore.enrolled() {
+                        self.refreshStoredUnlock(ticket: self.biometricTicket)
+                    }
                 }
             } catch {
                 self?.fail(error)
@@ -61,6 +76,9 @@ final class SessionModel: ObservableObject {
     }
 
     func signOut() {
+        biometricTicket += 1
+        BiometricStore.delete()
+        biometricsOn = false
         busy = true
         refreshTimer?.invalidate()
         refreshTimer = nil
@@ -209,6 +227,98 @@ final class SessionModel: ObservableObject {
         }
     }
 
+    func saveFile(_ item: DropItem) {
+        guard let client else { return }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            do {
+                let file = try client.downloadItem(item.id)
+                DispatchQueue.main.async {
+                    self?.exportName = file.name.isEmpty ? "file" : file.name
+                    self?.exportData = file.bytes
+                    self?.busy = false
+                    self?.status = ""
+                }
+            } catch {
+                self?.fail(error)
+            }
+        }
+    }
+
+    func offerBiometrics() {
+        guard !triedBiometrics, biometricsOn, account == nil else { return }
+        triedBiometrics = true
+        unlockWithBiometrics()
+    }
+
+    func unlockWithBiometrics() {
+        guard biometricsOn, !busy else { return }
+        let server = self.server.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = self.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        busy = true
+        error = ""
+        status = "Unlocking…"
+        http = server.hasPrefix("http://")
+        // Face ID presents on the main thread. This call has to block somewhere else.
+        work.async { [weak self] in
+            switch BiometricStore.load() {
+            case .canceled:
+                DispatchQueue.main.async {
+                    self?.busy = false
+                    self?.status = ""
+                }
+            case .failed(let message):
+                DispatchQueue.main.async {
+                    self?.error = message
+                    self?.busy = false
+                    self?.status = ""
+                }
+            case .success(var data):
+                defer { wipe(&data) }
+                do {
+                    let decoded = try UnlockBlob.decode(data)
+                    var saved = decoded.server
+                    while saved.hasSuffix("/") { saved.removeLast() }
+                    var current = server
+                    while current.hasSuffix("/") { current.removeLast() }
+                    guard saved == current, decoded.username == username else {
+                        throw DropError.message("Enter your password.")
+                    }
+                    let next = try DropClient(server: server)
+                    let snapshot = try next.restore(data)
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.client = next
+                        self.show(snapshot, status: "")
+                        self.startRefresh()
+                        self.drainInbox()
+                    }
+                } catch {
+                    self?.fail(error)
+                }
+            }
+        }
+    }
+
+    func setBiometrics(_ enabled: Bool) {
+        biometricTicket += 1
+        if !enabled {
+            BiometricStore.delete()
+            biometricsOn = false
+            status = "Biometric unlock is off."
+            return
+        }
+        guard biometryAvailable else {
+            error = "Biometrics aren't available on this phone."
+            biometricsOn = false
+            return
+        }
+        biometricsOn = true
+        error = ""
+        refreshStoredUnlock(ticket: biometricTicket)
+    }
+
     func finishShare() {
         if let shareURL {
             try? FileManager.default.removeItem(at: shareURL)
@@ -306,6 +416,45 @@ final class SessionModel: ObservableObject {
             if !failures.isEmpty {
                 self?.error = failures.joined(separator: " ")
                 self?.status = ""
+            }
+        }
+    }
+
+    private func refreshStoredUnlock(ticket: Int) {
+        guard let client else {
+            biometricsOn = BiometricStore.enrolled()
+            return
+        }
+        work.async { [weak self] in
+            var bytes = Data()
+            defer { wipe(&bytes) }
+            let saved: BiometricSave
+            do {
+                bytes = try client.exportUnlock()
+                saved = BiometricStore.save(bytes)
+            } catch let error as DropError {
+                saved = .failed(error.text)
+            } catch {
+                saved = .failed("Couldn't store biometric unlock.")
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.biometricTicket != ticket || self.account == nil {
+                    if case .success = saved {
+                        BiometricStore.delete()
+                    }
+                    return
+                }
+                switch saved {
+                case .success:
+                    self.biometricsOn = true
+                    self.status = "Biometric unlock is on."
+                case .canceled:
+                    self.biometricsOn = BiometricStore.enrolled()
+                case .failed(let message):
+                    self.biometricsOn = BiometricStore.enrolled()
+                    self.error = message
+                }
             }
         }
     }

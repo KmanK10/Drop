@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Take a photo to add it to your Drop clipboard.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Unlock Drop with Face ID. The password still works if Face ID is off or fails.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

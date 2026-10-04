@@ -2,7 +2,9 @@
 
 Windows, Mac, and iPhone clients for an existing Drop server. They use the same Argon2id split and AES-256-GCM layout as the browser. The server still stores ciphertext only.
 
-After you sign in and enter the password once, the session cookie and the content key stay in the process until you quit the app. Closing the desktop window leaves Drop in the notification area or menu bar. Quitting, or signing out, drops both. The password and the content key are not written to disk, Keychain, or UserDefaults. The only file that is saved is the server address and the username.
+After you sign in and enter the password once, the session cookie and the content key stay in the process until you quit the app. Closing the desktop window leaves Drop in the notification area or menu bar. Signing out drops both. The password is never written down. The only file that is saved is the server address and the username.
+
+Biometric unlock is off until you turn it on after that password sign-in. On iPhone that is Face ID or Touch ID, on Mac it is Touch ID, and on Windows it is Windows Hello. Turning it on stores the content key in the platform keychain, together with the session cookie that key needs, and a later unlock can release them without the password. The password is never stored. If biometrics fail, are canceled, or are off, type the password. Sign out deletes the keychain item. Quit leaves that item in place when biometric unlock is on, and on the desktop it also keeps the server session so the next launch can use it. When biometric unlock is off, quit forgets the in-memory key, and the desktop app signs out of the server.
 
 There is no public signup. An admin still creates the account in the browser.
 
@@ -76,13 +78,13 @@ This Linux environment cannot compile or run the Mac tray, and it cannot build t
 
 The Xcode project is `clients/ios/Drop.xcodeproj`. It is an iPhone app plus a share extension. iOS 17 or later.
 
-The app keeps the content key in memory and the session cookie in an ephemeral `URLSession`. Neither goes into the Keychain. The password field does not use a username or password content type, so iOS is not asked to store the password.
+The app keeps the content key in memory and the session cookie in an ephemeral `URLSession` until you turn on Face ID or Touch ID. That switch is off until a password sign-in. The password field does not use a username or password content type, so iOS is not asked to store the password. The content key is not written into the app-group inbox.
 
 The screen follows the system appearance, with the same cream and dark colors as the website. Typed text uses those colors, so it stays readable in light and dark. A tap outside a text field resigns the keyboard. There is no dismiss button in the window.
 
 The home-screen icon is the same clipboard as the Mac app, including the light plate and the dark plate. `desktop/make-icon.py` writes both 1024 pictures into `ios/App/Assets.xcassets/AppIcon.appiconset`. The dark picture is the `luminosity: dark` appearance. iOS masks the square.
 
-The + button can take a photo, choose a photo, or choose a file. Each of those is encrypted and uploaded the same way as a picked file.
+The + button, in a circle, opens from the button: take a photo, choose a photo, or choose a file. Each of those is encrypted and uploaded the same way as a picked file. Each clipboard row has a circled + for Copy, Share, Download, and Delete.
 
 Add items from the share sheet or with Paste. The share extension only copies the file into the app-group inbox (`group.com.kiefermenard.drop`) and opens `dropclipboard://inbox`. It does not have the content key and does not upload. The running app encrypts the file and then deletes the inbox copy. If Drop was not signed in, the file waits in the inbox until you sign in.
 

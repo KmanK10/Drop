@@ -12,6 +12,8 @@ mod mac_tray;
 mod win_tray;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod worker;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod biometric;
 
 fn main() {
     #[cfg(any(target_os = "windows", target_os = "macos"))]

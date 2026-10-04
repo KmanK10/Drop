@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
-use drop_core::{CopyPayload, Downloaded, DropClient, DropError, Snapshot};
+use drop_core::{CopyPayload, Downloaded, DropClient, DropError, Snapshot, UnlockMaterial};
 use zeroize::{Zeroize, Zeroizing};
 
 pub enum Command {
@@ -22,7 +22,15 @@ pub enum Command {
     Download(String),
     Delete(String),
     SignOut,
-    Shutdown,
+    PrepareBiometric,
+    Restore {
+        server: String,
+        username: String,
+        material: Zeroizing<Vec<u8>>,
+    },
+    Shutdown {
+        keep_session: bool,
+    },
 }
 
 pub enum WorkerEvent {
@@ -32,6 +40,11 @@ pub enum WorkerEvent {
     SignedOut,
     Copy(CopyPayload),
     Download(Downloaded),
+    BiometricMaterial(Zeroizing<Vec<u8>>),
+    BiometricUnlocked { epoch: u64, material: Zeroizing<Vec<u8>> },
+    BiometricStored { epoch: u64 },
+    BiometricCanceled { epoch: u64 },
+    BiometricFailed { epoch: u64, message: String },
 }
 
 pub fn spawn(rx: Receiver<Command>, tx: Sender<WorkerEvent>) -> std::thread::JoinHandle<()> {
@@ -55,11 +68,67 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
         };
 
         match command {
-            Command::Shutdown => {
-                if let Some(mut client) = client.take() {
-                    client.sign_out();
+            Command::Shutdown { keep_session } => {
+                if let Some(mut current) = client.take() {
+                    if !keep_session {
+                        current.sign_out();
+                    }
                 }
                 break;
+            }
+            Command::PrepareBiometric => {
+                let Some(current) = client.as_ref() else {
+                    let _ = tx.send(WorkerEvent::Error(DropError::Locked.to_string()));
+                    continue;
+                };
+                match current.unlock_material().and_then(|material| material.encode()) {
+                    Ok(bytes) => {
+                        let _ = tx.send(WorkerEvent::BiometricMaterial(bytes));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(WorkerEvent::Error(error.to_string()));
+                    }
+                }
+            }
+            Command::Restore {
+                server,
+                username,
+                mut material,
+            } => {
+                if let Some(mut previous) = client.take() {
+                    previous.sign_out();
+                }
+                let decoded = match UnlockMaterial::decode(&material) {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        material.zeroize();
+                        let _ = tx.send(WorkerEvent::Error(error.to_string()));
+                        continue;
+                    }
+                };
+                material.zeroize();
+                if decoded.username != username {
+                    let _ = tx.send(WorkerEvent::Error("Enter your password.".into()));
+                    continue;
+                }
+                let _ = tx.send(WorkerEvent::Status("Unlocking…".into()));
+                match DropClient::connect(&server) {
+                    Ok(mut next) => match next.restore(decoded) {
+                        Ok(snapshot) => {
+                            client = Some(next);
+                            let _ = tx.send(WorkerEvent::Status(String::new()));
+                            let _ = tx.send(WorkerEvent::Snapshot(snapshot));
+                        }
+                        Err(error) => {
+                            let _ = tx.send(WorkerEvent::Status(String::new()));
+                            let _ = tx.send(WorkerEvent::Error(error.to_string()));
+                        }
+                    },
+                    Err(error) => {
+                        let _ = tx.send(WorkerEvent::Status(String::new()));
+                        let _ = tx.send(WorkerEvent::Error(error.to_string()));
+                    }
+                }
             }
             Command::SignOut => {
                 if let Some(mut client) = client.take() {
