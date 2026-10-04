@@ -39,6 +39,7 @@ pub fn start(wake: impl Fn() + Send + 'static) -> Result<TrayPorts, String> {
     let (tx, rx) = mpsc::channel();
     let _ = ACTIONS.set(tx);
     let _ = WAKE.set(Mutex::new(Box::new(wake)));
+    crate::mac_prefs::load();
     unsafe { install_status_item()? };
     let tooltip_button = *BUTTON.get().ok_or("Missing menu bar button.")?;
     let status_item = *STATUS_ITEM.get().ok_or("Missing menu bar item.")?;
@@ -142,13 +143,17 @@ unsafe fn install_status_item() -> Result<(), String> {
 
 /// The application menu and the Dock menu read the checkmark from the keychain.
 /// Call this when that state may have changed.
+pub fn close_to_menu_bar() -> bool {
+    crate::mac_prefs::close_to_menu_bar()
+}
+
 pub fn refresh_command_menus() {
     unsafe {
         if let Some(menu) = APP_MENU.get() {
-            refresh_touch_id_item(*menu as *mut AnyObject);
+            refresh_menu(*menu as *mut AnyObject, true);
         }
         if let Some(menu) = DOCK_MENU.get() {
-            refresh_touch_id_item(*menu as *mut AnyObject);
+            refresh_menu(*menu as *mut AnyObject, false);
         }
     }
 }
@@ -203,6 +208,10 @@ unsafe fn status_target_class() -> &'static AnyClass {
         builder.add_method(
             sel!(menuTouchID:),
             menu_touch_id as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        builder.add_method(
+            sel!(menuCloseToMenuBar:),
+            menu_close_to_menu_bar as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
         builder.add_method(
             sel!(menuWillOpen:),
@@ -269,8 +278,13 @@ extern "C" fn menu_touch_id(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyO
     emit(TrayAction::SetBiometric(turn_on));
 }
 
+extern "C" fn menu_close_to_menu_bar(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+    crate::mac_prefs::toggle();
+}
+
 extern "C" fn menu_will_open(_this: *mut AnyObject, _cmd: Sel, menu: *mut AnyObject) {
-    unsafe { refresh_touch_id_item(menu) };
+    let app_menu = APP_MENU.get().copied() == Some(menu as usize);
+    unsafe { refresh_menu(menu, app_menu) };
 }
 
 unsafe fn install_command_menus(target: *mut AnyObject) {
@@ -308,8 +322,22 @@ unsafe fn install_application_menu(target: *mut AnyObject) {
         if crate::biometric::available() {
             insert_item(app_menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled(), insert_at);
             insert_item(app_menu, "Sign out", sel!(menuSignOut:), false, insert_at + 1);
+            insert_item(
+                app_menu,
+                "Close to menu bar",
+                sel!(menuCloseToMenuBar:),
+                crate::mac_prefs::close_to_menu_bar(),
+                insert_at + 2,
+            );
         } else {
             insert_item(app_menu, "Sign out", sel!(menuSignOut:), false, insert_at);
+            insert_item(
+                app_menu,
+                "Close to menu bar",
+                sel!(menuCloseToMenuBar:),
+                crate::mac_prefs::close_to_menu_bar(),
+                insert_at + 1,
+            );
         }
     }
     if let Some(index) = find_action(app_menu, sel!(terminate:)) {
@@ -343,21 +371,26 @@ unsafe fn install_dock_menu(target: *mut AnyObject) {
     let _ = DOCK_MENU.set(menu as usize);
 }
 
-unsafe fn refresh_touch_id_item(menu: *mut AnyObject) {
+unsafe fn refresh_menu(menu: *mut AnyObject, app_menu: bool) {
     if menu.is_null() {
         return;
     }
     if !menu_has_action(menu, sel!(menuTouchID:)) && crate::biometric::available() {
         let at = find_action(menu, sel!(menuSignOut:))
+            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
             .or_else(|| find_action(menu, sel!(menuQuit:)))
             .or_else(|| find_action(menu, sel!(terminate:)))
             .unwrap_or_else(|| item_count(menu));
         insert_item(menu, "Touch ID", sel!(menuTouchID:), false, at);
     }
-    if !menu_has_action(menu, sel!(menuTouchID:)) {
-        return;
+    if app_menu && !menu_has_action(menu, sel!(menuCloseToMenuBar:)) {
+        let at = find_action(menu, sel!(menuQuit:))
+            .or_else(|| find_action(menu, sel!(terminate:)))
+            .unwrap_or_else(|| item_count(menu));
+        insert_item(menu, "Close to menu bar", sel!(menuCloseToMenuBar:), crate::mac_prefs::close_to_menu_bar(), at);
     }
-    let on = crate::biometric::enrolled();
+    let touch_on = crate::biometric::enrolled();
+    let close_on = crate::mac_prefs::close_to_menu_bar();
     let count = item_count(menu);
     for index in 0..count {
         let item = item_at(menu, index);
@@ -365,7 +398,11 @@ unsafe fn refresh_touch_id_item(menu: *mut AnyObject) {
             continue;
         }
         if item_action_is(item, sel!(menuTouchID:)) {
-            let state: isize = if on { 1 } else { 0 };
+            let state: isize = if touch_on { 1 } else { 0 };
+            let _: () = msg_send![item, setState: state];
+        }
+        if item_action_is(item, sel!(menuCloseToMenuBar:)) {
+            let state: isize = if close_on { 1 } else { 0 };
             let _: () = msg_send![item, setState: state];
         }
     }

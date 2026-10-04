@@ -636,9 +636,14 @@ impl DropApp {
             }
         });
         ui.add_space(6.0);
-        let note = if cfg!(target_os = "macos") {
+        #[cfg(target_os = "macos")]
+        let note = if crate::mac_tray::close_to_menu_bar() {
             "Closing this window keeps Drop in the menu bar.".to_string()
         } else {
+            "Closing this window quits Drop.".to_string()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let note = {
             let forget = if self.biometrics {
                 "Sign out removes the keychain item."
             } else {
@@ -670,26 +675,37 @@ impl DropApp {
                             self.error.clear();
                             self.send(Command::Copy(item.id.clone()));
                         }
-                        ui.add_enabled_ui(!self.busy, |ui| {
-                            let menu_id = ui.id().with("shortcuts");
-                            let mut bar = egui::menu::BarState::load(ui.ctx(), menu_id);
-                            let plus = row_mark(ui, RowMark::Plus, colors.green).on_hover_text("Shortcuts");
-                            bar.bar_menu(&plus, |ui| {
-                                if item.can_copy && ui.button("Copy").clicked() {
-                                    ui.close_menu();
-                                    self.busy = true;
-                                    self.error.clear();
-                                    self.send(Command::Copy(item.id.clone()));
-                                }
-                                if ui.button("Download").clicked() {
-                                    ui.close_menu();
-                                    self.busy = true;
-                                    self.error.clear();
-                                    self.send(Command::Download(item.id.clone()));
-                                }
+                        if cfg!(target_os = "macos") {
+                            if ui
+                                .add_enabled(!self.busy, Button::new(RichText::new("Download").color(colors.green)))
+                                .clicked()
+                            {
+                                self.busy = true;
+                                self.error.clear();
+                                self.send(Command::Download(item.id.clone()));
+                            }
+                        } else {
+                            ui.add_enabled_ui(!self.busy, |ui| {
+                                let menu_id = ui.id().with("shortcuts");
+                                let mut bar = egui::menu::BarState::load(ui.ctx(), menu_id);
+                                let plus = row_mark(ui, RowMark::Plus, colors.green).on_hover_text("Shortcuts");
+                                bar.bar_menu(&plus, |ui| {
+                                    if item.can_copy && ui.button("Copy").clicked() {
+                                        ui.close_menu();
+                                        self.busy = true;
+                                        self.error.clear();
+                                        self.send(Command::Copy(item.id.clone()));
+                                    }
+                                    if ui.button("Download").clicked() {
+                                        ui.close_menu();
+                                        self.busy = true;
+                                        self.error.clear();
+                                        self.send(Command::Download(item.id.clone()));
+                                    }
+                                });
+                                bar.store(ui.ctx(), menu_id);
                             });
-                            bar.store(ui.ctx(), menu_id);
-                        });
+                        }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.add_enabled_ui(!self.busy, |ui| {
                                 let trash = row_mark(ui, RowMark::Trash, colors.danger).on_hover_text("Delete");
@@ -761,12 +777,21 @@ impl eframe::App for DropApp {
             self.unlock_with_biometrics();
         }
         if ctx.input(|input| input.viewport().close_requested()) && !self.quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            // Fully closed: menu bar only. A minimized window stays in the Dock,
-            // because minimize does not request close.
             #[cfg(target_os = "macos")]
-            crate::mac_tray::set_dock_icon_visible(false);
+            if crate::mac_tray::close_to_menu_bar() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                // Fully closed: menu bar only. A minimized window stays in the Dock,
+                // because minimize does not request close.
+                crate::mac_tray::set_dock_icon_visible(false);
+            } else {
+                self.request_quit(ctx);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
         }
         CentralPanel::default().show(ctx, |ui| {
             if self.account.is_some() {

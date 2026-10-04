@@ -7,6 +7,8 @@ mod icon;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod tray;
 #[cfg(target_os = "macos")]
+mod mac_prefs;
+#[cfg(target_os = "macos")]
 mod mac_tray;
 #[cfg(target_os = "windows")]
 mod win_tray;

@@ -25,7 +25,7 @@ The server field starts empty. Type the address of your own Drop server. The pla
 
 The desktop app is Rust (egui). One window works on Windows and Mac. The content key lives on a worker thread, not in the UI, and not in the config file.
 
-On Windows it adds a notification-area icon. On Mac a menu-bar icon is always there; click it to open the window. While that window is open or minimized, Drop also has a Dock icon. Closing the window hides it back to the menu bar and the Dock icon goes away. Drag a file onto the Dock icon to upload it. A drag onto the menu-bar icon still uploads when macOS delivers it; Mission Control takes most drags at the top of the screen, so the Dock icon is the one to use. On Mac, Touch ID, Sign out, and Quit are in the application menu, the menu named Drop immediately to the right of the Apple menu. Quit stays in that menu. Touch ID shows a checkmark when it is on, and there is no caption. The Dock icon menu is Open, Touch ID, Sign out, and Quit. Right-clicking the status icon has those commands as well. The Mac window does not show Sign out, Quit, or a Touch ID checkbox. On Windows, those controls stay in the window, and right-click the notification icon for Open, Sign out, and Quit. Drag a file onto that icon to upload it.
+On Windows it adds a notification-area icon. On Mac a menu-bar icon is always there; click it to open the window. While that window is open or minimized, Drop also has a Dock icon. Drag a file onto the Dock icon to upload it. A drag onto the menu-bar icon still uploads when macOS delivers it; Mission Control takes most drags at the top of the screen, so the Dock icon is the one to use. On Mac, the application menu named Drop, immediately to the right of the Apple menu, has Touch ID, Sign out, Close to menu bar, and Quit. Close to menu bar is on by default and shows a checkmark when it is on. While it is on, closing the window hides Drop and leaves the menu-bar icon, and the Dock icon goes away. Turn it off and closing the window quits Drop. The choice is saved in `window.json` next to the server address, not in the keychain. Touch ID shows a checkmark when it is on, and there is no caption. The Dock icon menu is Open, Touch ID, Sign out, and Quit. Right-clicking the status icon has those commands as well. The Mac window does not show Sign out, Quit, or a Touch ID checkbox. On Windows, those controls stay in the window, and right-click the notification icon for Open, Sign out, and Quit. Drag a file onto that icon to upload it.
 
 Explorer paints the Windows icon, so a file drop is caught by a small layered window that appears over the icon only while a drag is already in progress. A click that starts on the icon still opens Drop.
 
@@ -35,12 +35,12 @@ Touch ID stores the unlock blob in the data protection keychain, which is the ke
 
 The window follows the system appearance, the same way the website follows `prefers-color-scheme`. Light mode stays the cream palette. Dark mode uses the website's dark colors. The Mac menu-bar icon is a template image, so the menu bar already adapts.
 
-Each clipboard row has Copy beside a circled +. That menu holds Copy and Download. A red trash mark in a matching circle deletes the item on one click.
+On Windows, each clipboard row has Copy beside a circled +. That menu holds Copy and Download. A red trash mark in a matching circle deletes the item on one click. On Mac, Copy and Download are buttons next to each other, and the red circled trash stays on the other side. One click copies, downloads, or deletes.
 
 Config paths, server address and username only:
 
 - Windows: `%APPDATA%\Drop\config.json`
-- Mac: `~/Library/Application Support/Drop/config.json`
+- Mac: `~/Library/Application Support/Drop/config.json` for the server address and username. `window.json` in that same folder remembers Close to menu bar.
 - Linux is not a supported desktop target. `cargo run -p drop-desktop` there prints a short message and exits.
 
 ### Windows
