@@ -4,8 +4,12 @@
 //! icon still uploads when macOS delivers the drag. Mission Control takes most
 //! drags at the top of the screen, so the Dock icon is the drop target: macOS
 //! sends those files as an open-documents Apple Event. Closing the window
-//! (back to the menu bar only) removes the Dock icon. This file is compiled
-//! on macOS only.
+//! (back to the menu bar only) removes the Dock icon.
+//!
+//! Touch ID, Sign out, and Quit live in the application menu (the menu named
+//! after the app, immediately to the right of the Apple menu) and in the Dock
+//! icon menu. A right-click on the status item has the same commands as an
+//! extra. This file is compiled on macOS only.
 
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -25,6 +29,8 @@ static WAKE: OnceLock<Mutex<Box<dyn Fn() + Send>>> = OnceLock::new();
 static BUTTON: OnceLock<usize> = OnceLock::new();
 static STATUS_ITEM: OnceLock<usize> = OnceLock::new();
 static TARGET: OnceLock<usize> = OnceLock::new();
+static APP_MENU: OnceLock<usize> = OnceLock::new();
+static DOCK_MENU: OnceLock<usize> = OnceLock::new();
 
 pub fn start(wake: impl Fn() + Send + 'static) -> Result<TrayPorts, String> {
     if !claim_single_instance() {
@@ -127,10 +133,24 @@ unsafe fn install_status_item() -> Result<(), String> {
     let types = dragged_types();
     let _: () = msg_send![button, registerForDraggedTypes: types];
     register_dock_drops(target);
+    install_command_menus(target);
     // The window is already open on this first frame, so the Dock icon comes up
     // with it. Hiding the window later switches back to the accessory policy.
     set_dock_icon_visible(true);
     Ok(())
+}
+
+/// The application menu and the Dock menu read the checkmark from the keychain.
+/// Call this when that state may have changed.
+pub fn refresh_command_menus() {
+    unsafe {
+        if let Some(menu) = APP_MENU.get() {
+            refresh_touch_id_item(*menu as *mut AnyObject);
+        }
+        if let Some(menu) = DOCK_MENU.get() {
+            refresh_touch_id_item(*menu as *mut AnyObject);
+        }
+    }
 }
 
 unsafe fn register_dock_drops(target: *mut AnyObject) {
@@ -183,6 +203,10 @@ unsafe fn status_target_class() -> &'static AnyClass {
         builder.add_method(
             sel!(menuTouchID:),
             menu_touch_id as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        builder.add_method(
+            sel!(menuWillOpen:),
+            menu_will_open as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
         builder.add_method(
             sel!(handleOpenDocuments:withReplyEvent:),
@@ -245,6 +269,145 @@ extern "C" fn menu_touch_id(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyO
     emit(TrayAction::SetBiometric(turn_on));
 }
 
+extern "C" fn menu_will_open(_this: *mut AnyObject, _cmd: Sel, menu: *mut AnyObject) {
+    unsafe { refresh_touch_id_item(menu) };
+}
+
+unsafe fn install_command_menus(target: *mut AnyObject) {
+    install_application_menu(target);
+    install_dock_menu(target);
+}
+
+unsafe fn install_application_menu(target: *mut AnyObject) {
+    let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+    if app.is_null() {
+        return;
+    }
+    let mut main: *mut AnyObject = msg_send![app, mainMenu];
+    if main.is_null() {
+        main = msg_send![class!(NSMenu), alloc];
+        main = msg_send![main, init];
+        let top = make_item("Drop", sel!(menuOpen:), false);
+        let _: () = msg_send![main, addItem: top];
+        let _: () = msg_send![app, setMainMenu: main];
+    }
+    let top: *mut AnyObject = msg_send![main, itemAtIndex: 0isize];
+    if top.is_null() {
+        return;
+    }
+    let mut app_menu: *mut AnyObject = msg_send![top, submenu];
+    if app_menu.is_null() {
+        app_menu = msg_send![class!(NSMenu), alloc];
+        app_menu = msg_send![app_menu, init];
+        let _: () = msg_send![app_menu, setTitle: ns_string("Drop")];
+        let _: () = msg_send![top, setSubmenu: app_menu];
+    }
+    if !menu_has_action(app_menu, sel!(menuSignOut:)) {
+        let quit_at = find_action(app_menu, sel!(terminate:)).or_else(|| find_action(app_menu, sel!(menuQuit:)));
+        let insert_at = quit_at.unwrap_or_else(|| item_count(app_menu));
+        if crate::biometric::available() {
+            insert_item(app_menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled(), insert_at);
+            insert_item(app_menu, "Sign out", sel!(menuSignOut:), false, insert_at + 1);
+        } else {
+            insert_item(app_menu, "Sign out", sel!(menuSignOut:), false, insert_at);
+        }
+    }
+    if let Some(index) = find_action(app_menu, sel!(terminate:)) {
+        let quit = item_at(app_menu, index);
+        let _: () = msg_send![quit, setTarget: target];
+        let _: () = msg_send![quit, setAction: sel!(menuQuit:)];
+    } else if !menu_has_action(app_menu, sel!(menuQuit:)) {
+        let index = item_count(app_menu);
+        insert_item(app_menu, "Quit", sel!(menuQuit:), false, index);
+        let quit = item_at(app_menu, index);
+        let _: () = msg_send![quit, setKeyEquivalent: ns_string("q")];
+    }
+    let _: () = msg_send![app_menu, setDelegate: target];
+    let _ = APP_MENU.set(app_menu as usize);
+}
+
+unsafe fn install_dock_menu(target: *mut AnyObject) {
+    let menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
+    let menu: *mut AnyObject = msg_send![menu, init];
+    add_item(menu, "Open", sel!(menuOpen:), false);
+    if crate::biometric::available() {
+        add_item(menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled());
+    }
+    add_item(menu, "Sign out", sel!(menuSignOut:), false);
+    add_item(menu, "Quit", sel!(menuQuit:), false);
+    let _: () = msg_send![menu, setDelegate: target];
+    let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+    if !app.is_null() {
+        let _: () = msg_send![app, setDockMenu: menu];
+    }
+    let _ = DOCK_MENU.set(menu as usize);
+}
+
+unsafe fn refresh_touch_id_item(menu: *mut AnyObject) {
+    if menu.is_null() {
+        return;
+    }
+    if !menu_has_action(menu, sel!(menuTouchID:)) && crate::biometric::available() {
+        let at = find_action(menu, sel!(menuSignOut:))
+            .or_else(|| find_action(menu, sel!(menuQuit:)))
+            .or_else(|| find_action(menu, sel!(terminate:)))
+            .unwrap_or_else(|| item_count(menu));
+        insert_item(menu, "Touch ID", sel!(menuTouchID:), false, at);
+    }
+    if !menu_has_action(menu, sel!(menuTouchID:)) {
+        return;
+    }
+    let on = crate::biometric::enrolled();
+    let count = item_count(menu);
+    for index in 0..count {
+        let item = item_at(menu, index);
+        if item.is_null() {
+            continue;
+        }
+        if item_action_is(item, sel!(menuTouchID:)) {
+            let state: isize = if on { 1 } else { 0 };
+            let _: () = msg_send![item, setState: state];
+        }
+    }
+}
+
+unsafe fn menu_has_action(menu: *mut AnyObject, action: Sel) -> bool {
+    find_action(menu, action).is_some()
+}
+
+unsafe fn find_action(menu: *mut AnyObject, wanted: Sel) -> Option<isize> {
+    let count = item_count(menu);
+    for index in 0..count {
+        let item = item_at(menu, index);
+        if item.is_null() {
+            continue;
+        }
+        if item_action_is(item, wanted) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+/// A separator's action is null. `Sel` cannot represent that, so compare pointers.
+unsafe fn item_action_is(item: *mut AnyObject, wanted: Sel) -> bool {
+    let ptr: *const std::ffi::c_void = msg_send![item, action];
+    !ptr.is_null() && ptr == wanted.as_ptr().cast()
+}
+
+unsafe fn item_count(menu: *mut AnyObject) -> isize {
+    msg_send![menu, numberOfItems]
+}
+
+unsafe fn item_at(menu: *mut AnyObject, index: isize) -> *mut AnyObject {
+    msg_send![menu, itemAtIndex: index]
+}
+
+unsafe fn insert_item(menu: *mut AnyObject, title: &str, action: Sel, checked: bool, index: isize) {
+    let item = make_item(title, action, checked);
+    let _: () = msg_send![menu, insertItem: item atIndex: index];
+}
+
 extern "C" fn dragging_entered(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) -> usize {
     1
 }
@@ -292,6 +455,11 @@ extern "C" fn right_mouse_up(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObj
 }
 
 unsafe fn add_item(menu: *mut AnyObject, title: &str, action: Sel, checked: bool) {
+    let item = make_item(title, action, checked);
+    let _: () = msg_send![menu, addItem: item];
+}
+
+unsafe fn make_item(title: &str, action: Sel, checked: bool) -> *mut AnyObject {
     let blank = ns_string("");
     let item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
     let item: *mut AnyObject = msg_send![item, initWithTitle: ns_string(title) action: action keyEquivalent: blank];
@@ -302,7 +470,7 @@ unsafe fn add_item(menu: *mut AnyObject, title: &str, action: Sel, checked: bool
     // NSControlStateValueOn is 1. The checkmark is the only state indicator.
     let state: isize = if checked { 1 } else { 0 };
     let _: () = msg_send![item, setState: state];
-    let _: () = msg_send![menu, addItem: item];
+    item
 }
 
 unsafe fn paths_from_open_event(event: *mut AnyObject) -> Vec<PathBuf> {

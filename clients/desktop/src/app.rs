@@ -753,6 +753,8 @@ impl DropApp {
 
 impl eframe::App for DropApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "macos")]
+        crate::mac_tray::refresh_command_menus();
         self.pump(ctx);
         if self.account.is_none() && !self.tried_biometrics && self.biometrics && !self.busy {
             self.tried_biometrics = true;
