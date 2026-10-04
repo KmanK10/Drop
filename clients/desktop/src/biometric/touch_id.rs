@@ -11,11 +11,13 @@ use super::BiometricError;
 const SERVICE: &str = "com.kiefermenard.drop.mac";
 const ACCOUNT: &str = "unlock";
 const ERR_SUCCESS: i32 = 0;
+const ERR_PARAM: i32 = -50;
 const ERR_USER_CANCELED: i32 = -128;
 const ERR_DUPLICATE_ITEM: i32 = -25299;
 const ERR_ITEM_NOT_FOUND: i32 = -25300;
 const ERR_INTERACTION_NOT_ALLOWED: i32 = -25308;
 const ERR_AUTH_FAILED: i32 = -25293;
+const ERR_MISSING_ENTITLEMENT: i32 = -34018;
 const BIOMETRY_CURRENT_SET: isize = 1 << 3;
 
 pub fn label() -> &'static str {
@@ -47,6 +49,15 @@ pub fn enrolled() -> bool {
     status == ERR_SUCCESS || status == ERR_INTERACTION_NOT_ALLOWED
 }
 
+/// Saves the unlock blob. The password is not in that blob.
+///
+/// A Touch ID constraint is a data-protection keychain feature, so the add
+/// sets `kSecUseDataProtectionKeychain`. macOS builds the access group for
+/// that keychain from the code signature. An unsigned local build has no
+/// keychain-access-groups entitlement, and `SecItemAdd` then fails, usually
+/// with -34018 (`errSecMissingEntitlement`) or -50 (`errSecParam`). No public
+/// call both keeps the item biometric-gated and succeeds without that
+/// entitlement. This function returns the keychain status instead of dropping it.
 pub fn store(secret: &[u8]) -> Result<(), BiometricError> {
     if !available() {
         return Err(BiometricError::Failed("Touch ID isn't available on this Mac.".into()));
@@ -77,7 +88,18 @@ pub fn store(secret: &[u8]) -> Result<(), BiometricError> {
     if status == ERR_DUPLICATE_ITEM {
         return update_secret(secret);
     }
-    Err(BiometricError::Failed("Couldn't store Touch ID unlock.".into()))
+    Err(store_error(status))
+}
+
+fn store_error(status: i32) -> BiometricError {
+    let message = if status == ERR_MISSING_ENTITLEMENT || status == ERR_PARAM {
+        format!(
+            "Couldn't store Touch ID unlock. An unsigned app cannot save a Touch ID keychain item (keychain error {status})."
+        )
+    } else {
+        format!("Couldn't store Touch ID unlock (keychain error {status}).")
+    };
+    BiometricError::Failed(message)
 }
 
 fn update_secret(secret: &[u8]) -> Result<(), BiometricError> {
@@ -93,7 +115,7 @@ fn update_secret(secret: &[u8]) -> Result<(), BiometricError> {
     if status == ERR_USER_CANCELED {
         return Err(BiometricError::Canceled);
     }
-    Err(BiometricError::Failed("Couldn't store Touch ID unlock.".into()))
+    Err(store_error(status))
 }
 
 pub fn load() -> Result<Zeroizing<Vec<u8>>, BiometricError> {
@@ -177,6 +199,10 @@ fn query(returning_data: bool, fail_ui: bool) -> Option<Dictionary> {
                 values.push(prompt);
             }
         }
+        // Same keychain as `store`. A query without this flag looks in the
+        // file-based keychain and will not see the Touch ID item.
+        keys.push(kSecUseDataProtectionKeychain as CfType);
+        values.push(kCFBooleanTrue);
         if fail_ui {
             keys.push(kSecUseAuthenticationUI as CfType);
             values.push(kSecUseAuthenticationUIFail as CfType);
@@ -254,6 +280,8 @@ fn add_dictionary(secret: &[u8], access: SecAccessControl) -> Option<Dictionary>
             kSecAttrAccount as CfType,
             kSecValueData as CfType,
             kSecAttrAccessControl as CfType,
+            kSecUseDataProtectionKeychain as CfType,
+            kSecUseAuthenticationUI as CfType,
         ];
         let values = [
             kSecClassGenericPassword as CfType,
@@ -261,6 +289,8 @@ fn add_dictionary(secret: &[u8], access: SecAccessControl) -> Option<Dictionary>
             account,
             data,
             access as CfType,
+            kCFBooleanTrue,
+            kSecUseAuthenticationUIAllow as CfType,
         ];
         let dictionary = CFDictionaryCreate(
             ptr::null(),
@@ -350,7 +380,9 @@ extern "C" {
     static kSecMatchLimitOne: CfString;
     static kSecUseOperationPrompt: CfString;
     static kSecUseAuthenticationUI: CfString;
+    static kSecUseAuthenticationUIAllow: CfString;
     static kSecUseAuthenticationUIFail: CfString;
+    static kSecUseDataProtectionKeychain: CfString;
     static kSecAttrAccessibleWhenUnlockedThisDeviceOnly: CfString;
 
     fn SecAccessControlCreateWithFlags(

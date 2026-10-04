@@ -243,6 +243,8 @@ impl DropApp {
             TrayAction::Open => show_window(ctx),
             TrayAction::SignOut => self.sign_out(),
             TrayAction::Quit => self.request_quit(ctx),
+            #[cfg(target_os = "macos")]
+            TrayAction::SetBiometric(enabled) => self.set_biometrics(enabled),
             TrayAction::Dropped(paths) => {
                 show_window(ctx);
                 if self.account.is_none() {
@@ -318,8 +320,10 @@ impl DropApp {
                     return;
                 }
                 self.biometrics = true;
-                self.status = format!("{} is on.", biometric::label());
                 self.busy = false;
+                if !cfg!(target_os = "macos") {
+                    self.status = format!("{} is on.", biometric::label());
+                }
             }
             WorkerEvent::BiometricCanceled { epoch } => {
                 if epoch != self.biometric_epoch {
@@ -374,6 +378,30 @@ impl DropApp {
             keep_session: biometric::enrolled(),
         });
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn set_biometrics(&mut self, enabled: bool) {
+        if self.busy {
+            return;
+        }
+        if enabled {
+            if self.account.is_none() {
+                self.error = "Sign in with your password before turning this on.".into();
+                return;
+            }
+            self.biometrics = true;
+            self.busy = true;
+            self.error.clear();
+            self.send(Command::PrepareBiometric);
+        } else {
+            self.biometric_epoch = self.biometric_epoch.wrapping_add(1);
+            biometric::delete();
+            self.biometrics = false;
+            self.refresh_biometrics = false;
+            if !cfg!(target_os = "macos") {
+                self.status = format!("{} is off.", biometric::label());
+            }
+        }
     }
 
     fn sign_out(&mut self) {
@@ -524,21 +552,24 @@ impl DropApp {
         );
     }
 
-    fn clipboard_ui(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+    fn clipboard_ui(&mut self, ui: &mut egui::Ui, #[allow(unused_variables)] ctx: &Context) {
         let account = self.account.clone();
         let Some(account) = account else {
             return;
         };
         ui.horizontal(|ui| {
             wordmark(ui);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(Button::new("Quit")).clicked() {
-                    self.request_quit(ctx);
-                }
-                if ui.add(Button::new("Sign out")).clicked() && !self.busy {
-                    self.sign_out();
-                }
-            });
+            // Mac keeps Sign out, Quit, and Touch ID on the menu-bar menu.
+            if !cfg!(target_os = "macos") {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(Button::new("Quit")).clicked() {
+                        self.request_quit(ctx);
+                    }
+                    if ui.add(Button::new("Sign out")).clicked() && !self.busy {
+                        self.sign_out();
+                    }
+                });
+            }
         });
         let colors = colors(ui);
         ui.label(
@@ -559,21 +590,11 @@ impl DropApp {
                     .size(12.0),
             );
         }
-        if self.biometric_available {
+        if self.biometric_available && !cfg!(target_os = "macos") {
             let mut enabled = self.biometrics;
             let response = ui.add_enabled(!self.busy, egui::Checkbox::new(&mut enabled, biometric::label()));
-            if response.changed() && !self.busy {
-                if enabled {
-                    self.biometrics = true;
-                    self.busy = true;
-                    self.error.clear();
-                    self.send(Command::PrepareBiometric);
-                } else {
-                    self.biometric_epoch = self.biometric_epoch.wrapping_add(1);
-                    biometric::delete();
-                    self.biometrics = false;
-                    self.status = format!("{} is off.", biometric::label());
-                }
+            if response.changed() {
+                self.set_biometrics(enabled);
             }
             ui.label(
                 RichText::new("Off until you turn this on after signing in with your password. The content key goes in the system keychain, not a file, and the password is not stored. Sign out removes it.")
@@ -615,21 +636,17 @@ impl DropApp {
             }
         });
         ui.add_space(6.0);
-        let place = if cfg!(target_os = "macos") {
-            "menu bar"
+        let note = if cfg!(target_os = "macos") {
+            "Closing this window keeps Drop in the menu bar.".to_string()
         } else {
-            "notification area"
+            let forget = if self.biometrics {
+                "Sign out removes the keychain item."
+            } else {
+                "Quit forgets the key."
+            };
+            format!("Closing this window keeps Drop in the notification area. {forget}")
         };
-        let forget = if self.biometrics {
-            "Sign out removes the keychain item."
-        } else {
-            "Quit forgets the key."
-        };
-        ui.label(
-            RichText::new(format!("Closing this window keeps Drop in the {place}. {forget}"))
-                .color(colors.muted)
-                .size(11.0),
-        );
+        ui.label(RichText::new(note).color(colors.muted).size(11.0));
     }
 
     fn item_card(&mut self, ui: &mut egui::Ui, item: &ItemSummary) {

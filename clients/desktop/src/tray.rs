@@ -5,6 +5,9 @@ pub enum TrayAction {
     Open,
     SignOut,
     Quit,
+    /// Mac menu-bar item. `true` turns Touch ID on, `false` deletes the keychain item.
+    #[cfg(target_os = "macos")]
+    SetBiometric(bool),
     Dropped(Vec<PathBuf>),
 }
 

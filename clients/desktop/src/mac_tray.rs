@@ -181,6 +181,10 @@ unsafe fn status_target_class() -> &'static AnyClass {
         );
         builder.add_method(sel!(menuQuit:), menu_quit as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
         builder.add_method(
+            sel!(menuTouchID:),
+            menu_touch_id as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        builder.add_method(
             sel!(handleOpenDocuments:withReplyEvent:),
             handle_open_documents as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject),
         );
@@ -236,6 +240,11 @@ extern "C" fn menu_quit(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObjec
     emit(TrayAction::Quit);
 }
 
+extern "C" fn menu_touch_id(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+    let turn_on = !crate::biometric::enrolled();
+    emit(TrayAction::SetBiometric(turn_on));
+}
+
 extern "C" fn dragging_entered(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) -> usize {
     1
 }
@@ -272,14 +281,17 @@ extern "C" fn right_mouse_up(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObj
     unsafe {
         let menu: *mut AnyObject = msg_send![class!(NSMenu), alloc];
         let menu: *mut AnyObject = msg_send![menu, init];
-        add_item(menu, "Open", sel!(menuOpen:));
-        add_item(menu, "Sign out", sel!(menuSignOut:));
-        add_item(menu, "Quit Drop", sel!(menuQuit:));
+        add_item(menu, "Open", sel!(menuOpen:), false);
+        if crate::biometric::available() {
+            add_item(menu, "Touch ID", sel!(menuTouchID:), crate::biometric::enrolled());
+        }
+        add_item(menu, "Sign out", sel!(menuSignOut:), false);
+        add_item(menu, "Quit", sel!(menuQuit:), false);
         let _: () = msg_send![class!(NSMenu), popUpContextMenu: menu withEvent: event forView: this];
     }
 }
 
-unsafe fn add_item(menu: *mut AnyObject, title: &str, action: Sel) {
+unsafe fn add_item(menu: *mut AnyObject, title: &str, action: Sel, checked: bool) {
     let blank = ns_string("");
     let item: *mut AnyObject = msg_send![class!(NSMenuItem), alloc];
     let item: *mut AnyObject = msg_send![item, initWithTitle: ns_string(title) action: action keyEquivalent: blank];
@@ -287,6 +299,9 @@ unsafe fn add_item(menu: *mut AnyObject, title: &str, action: Sel) {
         let target = *target as *mut AnyObject;
         let _: () = msg_send![item, setTarget: target];
     }
+    // NSControlStateValueOn is 1. The checkmark is the only state indicator.
+    let state: isize = if checked { 1 } else { 0 };
+    let _: () = msg_send![item, setState: state];
     let _: () = msg_send![menu, addItem: item];
 }
 
