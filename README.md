@@ -73,3 +73,7 @@ The dev server is [http://127.0.0.1:43123](http://127.0.0.1:43123). Set `SETUP_S
 ## How the key is split
 
 Argon2id (19 MiB, 2 iterations) runs in the browser and produces 64 bytes. The first 32 are hashed to form the auth verifier sent at signup and login. The server stores only a hash of that verifier, plus the salt and KDF parameters. The last 32 bytes are the AES-256-GCM content key. They are used to encrypt the item and a small key-check, then discarded from the signup request. Unlocking checks the key-check locally and does not send the password.
+
+## Native clients
+
+Windows, Mac, and iPhone clients reuse this server and the same Argon2id / AES-256-GCM split. After a person signs in, the session and the content key stay in process memory until that app quits. They are not written to disk. See [clients/README.md](clients/README.md) for how to build and run them. There is still no public signup.

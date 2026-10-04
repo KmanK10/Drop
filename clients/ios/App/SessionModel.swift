@@ -1,0 +1,367 @@
+import DropKit
+import Foundation
+import UIKit
+
+/// Holds the signed-in client for the life of the process. Closing the app
+/// drops the content key with the process. Nothing here writes it down.
+final class SessionModel: ObservableObject {
+    @Published var server: String
+    @Published var username: String
+    @Published var password = ""
+    @Published var draft = ""
+    @Published var account: DropAccount?
+    @Published var items: [DropItem] = []
+    @Published var error = ""
+    @Published var status = ""
+    @Published var busy = false
+    @Published var http = false
+    @Published var pickingFile = false
+    @Published var shareURL: URL?
+    @Published var pendingDelete: String?
+
+    private var client: DropClient?
+    private let work = DispatchQueue(label: "com.kiefermenard.drop.session")
+    private var refreshTimer: Timer?
+
+    init() {
+        let settings = DropSettings.load()
+        server = settings.serverURL
+        username = settings.username
+        http = server.hasPrefix("http://")
+    }
+
+    func signIn() {
+        let server = self.server.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = self.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = self.password
+        self.password = ""
+        guard !server.isEmpty, !username.isEmpty, !password.isEmpty else {
+            error = "Enter the server, username, and password."
+            return
+        }
+        try? DropSettings(serverURL: server, username: username).save()
+        busy = true
+        error = ""
+        status = "Signing in…"
+        http = server.hasPrefix("http://")
+        work.async { [weak self] in
+            do {
+                let next = try DropClient(server: server)
+                let snapshot = try next.signIn(username: username, password: password)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.client = next
+                    self.show(snapshot, status: "")
+                    self.startRefresh()
+                    self.drainInbox()
+                }
+            } catch {
+                self?.fail(error)
+            }
+        }
+    }
+
+    func signOut() {
+        busy = true
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        let current = client
+        client = nil
+        account = nil
+        items = []
+        pendingDelete = nil
+        work.async { [weak self] in
+            current?.signOut()
+            DispatchQueue.main.async {
+                self?.busy = false
+                self?.status = ""
+            }
+        }
+    }
+
+    func saveDraft() {
+        let text = draft
+        draft = ""
+        guard let client else {
+            error = DropError.locked.text
+            return
+        }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            do {
+                let snapshot = try client.uploadText(text)
+                DispatchQueue.main.async { self?.show(snapshot, status: "") }
+            } catch {
+                self?.fail(error)
+            }
+        }
+    }
+
+    func paste() {
+        error = ""
+        if let text = UIPasteboard.general.string, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            upload(text: text)
+            return
+        }
+        if let image = UIPasteboard.general.image, let png = image.pngData() {
+            upload(name: "pasted.png", mime: "image/png", data: png)
+            return
+        }
+        error = "The clipboard is empty."
+    }
+
+    func uploadPicked(_ urls: [URL]) {
+        guard let client else {
+            error = DropError.locked.text
+            return
+        }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            var last: DropSnapshot?
+            var failures: [String] = []
+            var uploaded = 0
+            for url in urls {
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer {
+                    if accessed { url.stopAccessingSecurityScopedResource() }
+                }
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                    failures.append(DropError.directory.text)
+                    continue
+                }
+                let name = url.lastPathComponent.isEmpty ? "file" : url.lastPathComponent
+                guard let data = try? Data(contentsOf: url) else {
+                    failures.append("Couldn't read \(name).")
+                    continue
+                }
+                do {
+                    last = try client.uploadFile(name: name, mime: mimeForFilename(name), bytes: Array(data))
+                    uploaded += 1
+                } catch {
+                    failures.append((error as? DropError)?.text ?? error.localizedDescription)
+                }
+            }
+            DispatchQueue.main.async {
+                if let last {
+                    let message = uploaded == 1 ? "Uploaded 1 file." : "Uploaded \(uploaded) files."
+                    self?.show(last, status: failures.isEmpty ? message : "Uploaded \(uploaded).")
+                } else {
+                    self?.busy = false
+                }
+                if !failures.isEmpty {
+                    self?.error = failures.joined(separator: " ")
+                    self?.status = ""
+                }
+            }
+        }
+    }
+
+    func copy(_ item: DropItem) {
+        guard let client else { return }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            do {
+                let payload = try client.copyItem(item.id)
+                DispatchQueue.main.async {
+                    switch payload {
+                    case .text(let text):
+                        UIPasteboard.general.string = text
+                        self?.status = "Copied."
+                    case .image(let data):
+                        if let image = UIImage(data: data) {
+                            UIPasteboard.general.image = image
+                            self?.status = "Copied."
+                        } else {
+                            self?.error = "Couldn't copy that image. Share it instead."
+                        }
+                    }
+                    self?.busy = false
+                }
+            } catch {
+                self?.fail(error)
+            }
+        }
+    }
+
+    func download(_ item: DropItem) {
+        guard let client else { return }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            do {
+                let file = try client.downloadItem(item.id)
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent(file.name)
+                try file.bytes.write(to: url, options: .atomic)
+                DispatchQueue.main.async {
+                    self?.shareURL = url
+                    self?.busy = false
+                    self?.status = ""
+                }
+            } catch {
+                self?.fail(error)
+            }
+        }
+    }
+
+    func finishShare() {
+        if let shareURL {
+            try? FileManager.default.removeItem(at: shareURL)
+        }
+        shareURL = nil
+    }
+
+    func delete(_ item: DropItem) {
+        if pendingDelete != item.id {
+            pendingDelete = item.id
+            return
+        }
+        pendingDelete = nil
+        guard let client else { return }
+        busy = true
+        work.async { [weak self] in
+            do {
+                let snapshot = try client.deleteItem(item.id)
+                DispatchQueue.main.async { self?.show(snapshot, status: "") }
+            } catch {
+                self?.fail(error)
+            }
+        }
+    }
+
+    func drainInbox() {
+        let staged = DropInbox.pending()
+        guard !staged.isEmpty else { return }
+        guard let client else {
+            error = "Sign in to add the shared items."
+            return
+        }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            var last: DropSnapshot?
+            var failures: [String] = []
+            for item in staged {
+                guard let data = DropInbox.readBody(item) else {
+                    failures.append("Couldn't read a shared item.")
+                    continue
+                }
+                do {
+                    if item.kind == "text" {
+                        last = try client.uploadText(String(decoding: data, as: UTF8.self))
+                    } else {
+                        let name = item.name.isEmpty ? "file" : item.name
+                        last = try client.uploadFile(name: name, mime: item.mime, bytes: Array(data))
+                    }
+                    DropInbox.remove(item)
+                } catch {
+                    failures.append((error as? DropError)?.text ?? error.localizedDescription)
+                }
+            }
+            DispatchQueue.main.async {
+                if let last {
+                    self?.show(last, status: "Added from the share sheet.")
+                } else {
+                    self?.busy = false
+                }
+                if !failures.isEmpty {
+                    self?.error = failures.joined(separator: " ")
+                }
+            }
+        }
+    }
+
+    private func upload(text: String) {
+        guard let client else {
+            error = DropError.locked.text
+            return
+        }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            do {
+                let snapshot = try client.uploadText(text)
+                DispatchQueue.main.async { self?.show(snapshot, status: "") }
+            } catch {
+                self?.fail(error)
+            }
+        }
+    }
+
+    private func upload(name: String, mime: String, data: Data) {
+        guard let client else {
+            error = DropError.locked.text
+            return
+        }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            do {
+                let snapshot = try client.uploadFile(name: name, mime: mime, bytes: Array(data))
+                DispatchQueue.main.async { self?.show(snapshot, status: "") }
+            } catch {
+                self?.fail(error)
+            }
+        }
+    }
+
+    private func show(_ snapshot: DropSnapshot, status: String) {
+        account = snapshot.account
+        items = snapshot.items
+        http = snapshot.http
+        busy = false
+        error = ""
+        self.status = status
+    }
+
+    private func fail(_ error: Error) {
+        let signedOut = (error as? DropError) == .signedOut
+        let text = (error as? DropError)?.text ?? error.localizedDescription
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if signedOut {
+                let current = self.client
+                self.client = nil
+                self.account = nil
+                self.items = []
+                self.refreshTimer?.invalidate()
+                self.refreshTimer = nil
+                self.work.async { current?.signOut() }
+            }
+            self.error = text
+            self.status = ""
+            self.busy = false
+        }
+    }
+
+    private func startRefresh() {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.refresh()
+            }
+        }
+    }
+
+    private func refresh() {
+        guard let client, !busy else { return }
+        work.async { [weak self] in
+            do {
+                let snapshot = try client.refresh()
+                DispatchQueue.main.async {
+                    guard let self, !self.busy else { return }
+                    self.account = snapshot.account
+                    self.items = snapshot.items
+                    self.http = snapshot.http
+                }
+            } catch DropError.signedOut {
+                self?.fail(DropError.signedOut)
+            } catch {
+                return
+            }
+        }
+    }
+}
