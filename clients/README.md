@@ -54,7 +54,20 @@ rustup target add x86_64-pc-windows-gnu
 cargo build --release -p drop-desktop --target x86_64-pc-windows-gnu
 ```
 
-The program is `target/x86_64-pc-windows-gnu/release/drop.exe`. Run that exe on Windows. This repository was cross-compiled with `x86_64-w64-mingw32-gcc` (see `clients/.cargo/config.toml`). A real notification-area drag still has to be tried on Windows; this environment cannot host the Windows shell.
+The portable program is `target/x86_64-pc-windows-gnu/release/drop.exe`. Run that exe on Windows. This repository was cross-compiled with `x86_64-w64-mingw32-gcc` (see `clients/.cargo/config.toml`). A real notification-area drag still has to be tried on Windows; this environment cannot host the Windows shell.
+
+The installer is the same program, wrapped so a person can run a setup file the way the Mac disk image is the thing you open:
+
+```bash
+cd clients
+./desktop/package-windows.sh
+```
+
+That writes `target/x86_64-pc-windows-gnu/release/DropSetup.exe`. Copy it to Windows and run it. The script does not codesign, and an unsigned installer is what this tree produces. It installs Drop for the current user at `%LOCALAPPDATA%\Programs\Drop\Drop.exe` and adds a Start menu shortcut named Drop. It does not start Drop when you sign in. The server address and username stay in `%APPDATA%\Drop`, the same folder the portable exe uses. Quit Drop before you install over a copy that is already open. Uninstall from Windows Settings. That removes the program and the Start menu shortcut and leaves the settings folder in place.
+
+`makensis` is required. On Debian or Ubuntu that is `sudo apt install nsis`.
+
+Windows already follows the Mac app on the shared window: the returning sign-in is only the PIN, or only the password; Use password and Use PIN sit directly above Change server or account; the PIN screen has no Sign in button; Change password says that changing the password turns the PIN off and then deletes the PIN wrap. The notification-area menu is Open, Close to notification area, Windows Hello when the PC has it, PIN or Set PIN, Change PIN when a PIN is set, Change password, Sign out, Delete account, and Quit, with the same dividers as the Mac menu. Each row shows the age, and when fewer than 4 days remain the days left appear in red beside that date.
 
 ### Mac
 
