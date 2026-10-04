@@ -49,4 +49,26 @@ mod icon_tests {
         assert!(rgba[center + 1] > 80);
         assert!(rgba[center + 3] > 200);
     }
+
+    #[test]
+    fn menu_bar_icon_is_the_clipboard_mark() {
+        let size = 36u32;
+        let rgba = super::icon::menu_bar_rgba(size);
+        assert_eq!(rgba.len(), (size * size * 4) as usize);
+        let pixel = |x: u32, y: u32| {
+            let index = ((y * size + x) * 4) as usize;
+            (rgba[index], rgba[index + 1], rgba[index + 2], rgba[index + 3])
+        };
+        let outside = pixel(1, 18);
+        assert_eq!(outside.3, 0, "beside the page");
+        let page = pixel(17, 28);
+        assert_eq!((page.0, page.1, page.2), (0, 0, 0));
+        assert!(page.3 > 200, "page {page:?}");
+        let rule = pixel(17, 20);
+        assert!(rule.3 < 40, "a rule cut out of the page {rule:?}");
+        let clip = pixel(12, 8);
+        assert!(clip.3 > 200, "clip {clip:?}");
+        let hole = pixel(17, 6);
+        assert!(hole.3 < 40, "hole in the clip {hole:?}");
+    }
 }

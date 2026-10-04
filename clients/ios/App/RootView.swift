@@ -143,10 +143,15 @@ private struct ClipboardView: View {
                         DispatchQueue.main.async { showSettings = true }
                     }
                 } label: {
-                    Text("Menu")
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(palette.ink)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                        .accessibilityLabel("Menu")
                 }
                 .menuOrder(.fixed)
-                .foregroundStyle(palette.ink)
+                .buttonStyle(.plain)
             }
             if let account = model.account {
                 Text("\(account.username) · \(DropFormat.bytes(account.usedBytes)) of \(DropFormat.bytes(account.quotaBytes)) · kept \(DropFormat.retention(account.ttlMs))")

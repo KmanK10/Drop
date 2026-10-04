@@ -3,10 +3,74 @@ pub fn tray_rgba(size: u32) -> Vec<u8> {
     disc(size, [0x1d, 0x68, 0x43, 0xff], [0xf4, 0xff, 0xf7, 0xff])
 }
 
-/// Black disc with a clear D, for the macOS template menu-bar image.
-#[cfg(target_os = "macos")]
+/// The app-icon clipboard, as a menu-bar template.
+///
+/// The page, clip, clip hole, and three rules use the same boxes as
+/// `desktop/make-icon.py`. Black pixels and clear gaps are enough at menu-bar
+/// size; a full-color tile of that mark is too small to read there. macOS
+/// tints a template image for the light and dark menu bar.
+#[cfg(any(target_os = "macos", test))]
 pub fn menu_bar_rgba(size: u32) -> Vec<u8> {
-    disc(size, [0x00, 0x00, 0x00, 0xff], [0x00, 0x00, 0x00, 0x00])
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    if size == 0 {
+        return rgba;
+    }
+    let aa = 0.7 / size as f32;
+    // The mark occupies the middle of the app icon. Spread that same shape
+    // across the status slot so the clip and the rules stay visible.
+    let span = 0.66 / 0.86;
+    let show_detail = size >= 32;
+    let line_h = 0.035_f32.max(2.2 / size as f32);
+    for y in 0..size {
+        let py = (y as f32 + 0.5) / size as f32;
+        let ny = 0.51 + (py - 0.5) * span;
+        for x in 0..size {
+            let px = (x as f32 + 0.5) / size as f32;
+            let nx = 0.50 + (px - 0.5) * span;
+            let paper = cover(round_box(nx, ny, 0.22, 0.30, 0.78, 0.84, 0.07), aa);
+            let mut line = 0.0;
+            if show_detail && paper > 0.5 {
+                for center in [0.46_f32, 0.58, 0.70] {
+                    if (0.34..=0.66).contains(&nx) && (ny - center).abs() <= line_h / 2.0 {
+                        line = 1.0;
+                        break;
+                    }
+                }
+            }
+            let mut clip = cover(round_box(nx, ny, 0.36, 0.18, 0.64, 0.42, 0.04), aa);
+            if show_detail {
+                let hole = cover(round_box(nx, ny, 0.44, 0.22, 0.56, 0.32, 0.035), aa);
+                clip *= 1.0 - hole;
+            }
+            let coverage = (paper * (1.0 - line)).max(clip).clamp(0.0, 1.0);
+            let alpha = (coverage * 255.0).round() as u8;
+            let index = ((y * size + x) * 4) as usize;
+            rgba[index] = 0;
+            rgba[index + 1] = 0;
+            rgba[index + 2] = 0;
+            rgba[index + 3] = alpha;
+        }
+    }
+    rgba
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn cover(distance: f32, aa: f32) -> f32 {
+    (0.5 - distance / aa).clamp(0.0, 1.0)
+}
+
+/// Signed distance to a rounded rectangle. Negative is inside, matching make-icon.py.
+#[cfg(any(target_os = "macos", test))]
+fn round_box(px: f32, py: f32, left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> f32 {
+    let cx = (left + right) / 2.0;
+    let cy = (top + bottom) / 2.0;
+    let half_w = (right - left) / 2.0;
+    let half_h = (bottom - top) / 2.0;
+    let dx = (px - cx).abs() - half_w + radius;
+    let dy = (py - cy).abs() - half_h + radius;
+    let ax = dx.max(0.0);
+    let ay = dy.max(0.0);
+    dx.max(dy).min(0.0) + (ax * ax + ay * ay).sqrt() - radius
 }
 
 fn disc(size: u32, fill: [u8; 4], letter: [u8; 4]) -> Vec<u8> {

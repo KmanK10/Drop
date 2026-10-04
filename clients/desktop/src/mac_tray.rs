@@ -176,6 +176,7 @@ unsafe fn register_dock_drops(target: *mut AnyObject) {
 }
 
 unsafe fn set_template_image(button: *mut AnyObject) {
+    // 36px drawn at 18pt. Template tint follows the menu bar; the shape is the clipboard.
     let png = icon::png_bytes(&icon::menu_bar_rgba(36), 36);
     let data: *mut AnyObject = msg_send![class!(NSData), dataWithBytes: png.as_ptr() length: png.len()];
     let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
