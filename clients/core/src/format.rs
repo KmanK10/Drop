@@ -33,6 +33,37 @@ pub fn retention_label(ttl_ms: u64) -> String {
     }
 }
 
+/// Days until `created_at_ms + ttl_ms`, using the real remaining time.
+/// `None` at 4 days or more, or when there is no lifetime. The age words
+/// from `format_when` are a separate clock and are not used here.
+pub fn days_left(created_at_ms: i64, ttl_ms: u64, now_ms: i64) -> Option<String> {
+    if ttl_ms == 0 {
+        return None;
+    }
+    let Ok(ttl) = i64::try_from(ttl_ms) else {
+        return None;
+    };
+    let Some(expires) = created_at_ms.checked_add(ttl) else {
+        return None;
+    };
+    let remaining = expires as i128 - now_ms as i128;
+    let day: i128 = 86_400_000;
+    if remaining >= 4 * day {
+        return None;
+    }
+    if remaining <= 0 {
+        return Some("0 days left".into());
+    }
+    let days = remaining / day;
+    if days <= 0 {
+        return Some("Less than a day".into());
+    }
+    if days == 1 {
+        return Some("1 day left".into());
+    }
+    Some(format!("{days} days left"))
+}
+
 pub fn format_when(timestamp_ms: i64, now_ms: i64) -> String {
     let seconds = ((now_ms - timestamp_ms) as f64 / 1000.0).round() as i64;
     if seconds < 15 {
@@ -105,7 +136,25 @@ pub fn text_preview(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_when;
+    use super::{days_left, format_when};
+
+    #[test]
+    fn days_left_warns_only_under_four_days() {
+        let day = 86_400_000_i64;
+        let ttl = (30 * day) as u64;
+        let created = 1_000_000_000_000_i64;
+        let expires = created + 30 * day;
+        assert_eq!(days_left(created, ttl, expires - 4 * day), None);
+        assert_eq!(days_left(created, ttl, expires - 4 * day + 1), Some("3 days left".into()));
+        assert_eq!(days_left(created, ttl, expires - 3 * day), Some("3 days left".into()));
+        assert_eq!(days_left(created, ttl, expires - 2 * day), Some("2 days left".into()));
+        assert_eq!(days_left(created, ttl, expires - day), Some("1 day left".into()));
+        assert_eq!(days_left(created, ttl, expires - day + 1), Some("Less than a day".into()));
+        assert_eq!(days_left(created, ttl, expires - 12 * 60 * 60 * 1000), Some("Less than a day".into()));
+        assert_eq!(days_left(created, ttl, expires), Some("0 days left".into()));
+        assert_eq!(days_left(created, ttl, expires + 1), Some("0 days left".into()));
+        assert_eq!(days_left(created, 0, expires - day), None);
+    }
 
     #[test]
     fn age_uses_the_desktop_words() {

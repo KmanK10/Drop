@@ -470,6 +470,7 @@ export function DropPage({
                   item={item}
                   unlocked={unlocked}
                   now={now}
+                  ttlMs={meta.itemTtlMs}
                   pendingDelete={pendingDelete === item.id}
                   onAskDelete={() => setPendingDelete(item.id)}
                   onDelete={() => void remove(item.id)}

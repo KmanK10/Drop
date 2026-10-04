@@ -10,6 +10,7 @@ import {
   imageWritePlan,
   type CopyEnv,
 } from "../src/client/lib/clipboard.ts";
+import { daysLeft, formatWhen } from "../src/client/lib/format.ts";
 import { utf8 } from "../src/shared/bytes.ts";
 
 function install(overrides: Partial<CopyEnv> = {}) {
@@ -260,6 +261,7 @@ describe("copyFileItem", () => {
           item,
           unlocked: true,
           now,
+          ttlMs: 30 * 24 * 60 * 60 * 1000,
           pendingDelete: false,
           onAskDelete: () => {},
           onDelete: () => {},
@@ -288,6 +290,44 @@ describe("copyFileItem", () => {
       size: 5,
       plain: { kind: "text", name: "", mime: "text/plain", body: utf8("hello"), text: "hello" },
     })).toEqual(["Copy", "Delete"]);
+  });
+
+  it("shows the days left in red beside the date only under 4 days", () => {
+    const now = 1_700_000_000_000;
+    const day = 24 * 60 * 60 * 1000;
+    const ttlMs = 30 * day;
+    function html(createdAt: number): string {
+      const item: ItemRecord = {
+        id: "note",
+        createdAt,
+        size: 5,
+        plain: { kind: "text", name: "", mime: "text/plain", body: utf8("hello"), text: "hello" },
+      };
+      return renderToStaticMarkup(
+        createElement(ItemCard, {
+          item,
+          unlocked: true,
+          now,
+          ttlMs,
+          pendingDelete: false,
+          onAskDelete: () => {},
+          onDelete: () => {},
+        }) as ReactNode,
+      );
+    }
+
+    const soon = html(now - ttlMs + 4 * day - 1);
+    expect(daysLeft(now - ttlMs + 4 * day - 1, ttlMs, now)).toBe("3 days left");
+    expect(soon).toContain(formatWhen(now - ttlMs + 4 * day - 1, now));
+    expect(soon).toContain("3 days left");
+    expect(soon).toContain("text-destructive");
+
+    const steady = html(now - ttlMs + 4 * day);
+    expect(daysLeft(now - ttlMs + 4 * day, ttlMs, now)).toBeNull();
+    expect(steady).toContain(formatWhen(now - ttlMs + 4 * day, now));
+    expect(steady).not.toContain("days left");
+    expect(steady).not.toContain("Less than a day");
+    expect(steady).not.toContain("text-destructive");
   });
 
   it("stays in the browser: no fetch, object URL, or download", () => {

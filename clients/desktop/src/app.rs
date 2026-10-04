@@ -3,7 +3,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use drop_core::{
-    format_bytes, load_settings, retention_label, save_settings, Account, CopyPayload, ItemSummary, Settings,
+    days_left, format_bytes, load_settings, now_ms, retention_label, save_settings, Account, CopyPayload, ItemSummary,
+    Settings,
 };
 use eframe::egui::{
     self, Align, Button, CentralPanel, Color32, Context, Frame, Layout, Margin, RichText, ScrollArea, Stroke,
@@ -1079,6 +1080,10 @@ impl DropApp {
 
     fn item_card(&mut self, ui: &mut egui::Ui, item: &ItemSummary) {
         let colors = colors(ui);
+        let expires_in = self
+            .account
+            .as_ref()
+            .and_then(|account| days_left(item.created_at, account.ttl_ms, now_ms()));
         Frame::none()
             .fill(colors.card)
             .stroke(Stroke::new(1.0_f32, colors.line))
@@ -1086,7 +1091,13 @@ impl DropApp {
             .rounding(8.0)
             .show(ui, |ui| {
                 ui.label(RichText::new(&item.title).strong().color(colors.ink));
-                ui.label(RichText::new(format!("{} · {}", item.detail, item.when)).color(colors.muted).size(12.0));
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.label(RichText::new(format!("{} · {}", item.detail, item.when)).color(colors.muted).size(12.0));
+                    if let Some(left) = &expires_in {
+                        ui.label(RichText::new(format!(" · {left}")).color(colors.danger).size(12.0));
+                    }
+                });
                 ui.push_id(&item.id, |ui| {
                     ui.horizontal(|ui| {
                         if item.can_copy

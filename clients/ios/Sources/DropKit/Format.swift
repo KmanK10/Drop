@@ -62,6 +62,23 @@ public enum DropFormat {
         return "\(month) \(day), \(year)"
     }
 
+    /// Days until `createdAt + ttlMs`. Nil at 4 days or more, or when there is no lifetime.
+    /// This is the real time left, not the age from `when`.
+    public static func daysLeft(createdAt: Int64, ttlMs: UInt64, nowMs: Int64) -> String? {
+        guard ttlMs > 0, let ttl = Int64(exactly: ttlMs) else { return nil }
+        let (expires, overflow) = createdAt.addingReportingOverflow(ttl)
+        guard !overflow else { return nil }
+        let (remaining, remainingOverflow) = expires.subtractingReportingOverflow(nowMs)
+        guard !remainingOverflow else { return nil }
+        let day: Int64 = 86_400_000
+        if remaining >= 4 * day { return nil }
+        if remaining <= 0 { return "0 days left" }
+        let days = remaining / day
+        if days <= 0 { return "Less than a day" }
+        if days == 1 { return "1 day left" }
+        return "\(days) days left"
+    }
+
     public static func nowMs() -> Int64 {
         Int64(Date().timeIntervalSince1970 * 1000.0)
     }

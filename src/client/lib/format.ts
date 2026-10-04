@@ -17,6 +17,22 @@ export function retentionLabel(ttlMs: number): string {
   return days === 1 ? "1 day" : `${days} days`;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Days until `createdAt + ttlMs`. Null at 4 days or more, or when there is no lifetime. */
+export function daysLeft(createdAt: number, ttlMs: number, now = Date.now()): string | null {
+  if (!Number.isFinite(createdAt) || !Number.isFinite(ttlMs) || !Number.isFinite(now) || ttlMs <= 0) return null;
+  const expires = createdAt + ttlMs;
+  if (!Number.isFinite(expires)) return null;
+  const remaining = expires - now;
+  if (remaining >= 4 * DAY_MS) return null;
+  if (remaining <= 0) return "0 days left";
+  const days = Math.floor(remaining / DAY_MS);
+  if (days <= 0) return "Less than a day";
+  if (days === 1) return "1 day left";
+  return `${days} days left`;
+}
+
 export function formatWhen(timestamp: number, now = Date.now()): string {
   const seconds = Math.round((now - timestamp) / 1000);
   if (seconds < 15) return "just now";

@@ -49,6 +49,26 @@ final class Vectors: XCTestCase {
         XCTAssertEqual(DropFormat.when(1_669_852_800_000, nowMs: now), "Dec 1, 2022")
     }
 
+    func testDaysLeftWarnsOnlyUnderFourDays() {
+        let day: Int64 = 86_400_000
+        let ttl = UInt64(30 * day)
+        let created: Int64 = 1_000_000_000_000
+        let expires = created + 30 * day
+        XCTAssertNil(DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires - 4 * day))
+        XCTAssertEqual(DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires - 4 * day + 1), "3 days left")
+        XCTAssertEqual(DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires - 3 * day), "3 days left")
+        XCTAssertEqual(DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires - 2 * day), "2 days left")
+        XCTAssertEqual(DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires - day), "1 day left")
+        XCTAssertEqual(DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires - day + 1), "Less than a day")
+        XCTAssertEqual(
+            DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires - 12 * 60 * 60 * 1000),
+            "Less than a day"
+        )
+        XCTAssertEqual(DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires), "0 days left")
+        XCTAssertEqual(DropFormat.daysLeft(createdAt: created, ttlMs: ttl, nowMs: expires + 1), "0 days left")
+        XCTAssertNil(DropFormat.daysLeft(createdAt: created, ttlMs: 0, nowMs: expires - day))
+    }
+
     func testPinRulesAreFourToEightDigits() throws {
         XCTAssertEqual(DropPin.rejection("123", confirm: nil), "Use 4 to 8 digits.")
         XCTAssertEqual(DropPin.rejection("123456789", confirm: nil), "Use 4 to 8 digits.")

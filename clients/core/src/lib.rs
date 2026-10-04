@@ -23,7 +23,7 @@ pub use crypto::{
     verify_key_check, AccountMaterial, Derived, KdfParams, KDF_MEMORY, KDF_PARALLELISM, KDF_TIME,
 };
 pub use error::DropError;
-pub use format::{format_bytes, format_when, retention_label};
+pub use format::{days_left, format_bytes, format_when, now_ms, retention_label};
 pub use item::{decode_item, encode_item, safe_download_name, ItemKind, ItemPlain};
 pub use kind::{clipboard_file_kind, ClipboardKind};
 pub use pin::{pin_rejection, unwrap_pin, wrap_pin};

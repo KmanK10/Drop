@@ -49,7 +49,7 @@ A device stays signed in for 30 days of use, up to 180 days. Decrypting still as
 
 Each account has a storage quota. New accounts get 5 GB. An admin can set any account, including their own, from 1 KB to 32 GB. The server rejects a larger quota, and it rejects an upload whose ciphertext would push the account over its quota. There is no separate item count or per-file cap. Names and file bytes are inside the ciphertext, so the quota is the sum of those blobs.
 
-Items are deleted 30 days after they are saved. That is a hard delete: the ciphertext is removed, same as deleting by hand. There is no trash. The invite page says so before a new person chooses a password, and the clipboard shows the quota and the 30 days beside it.
+Items are deleted 30 days after they are saved. That is a hard delete: the ciphertext is removed, same as deleting by hand. There is no trash. The invite page says so before a new person chooses a password, and the clipboard shows the quota and the 30 days beside it. When an item expires in less than 4 days, the webpage shows how many days are left in red beside its date, the same way the Mac, iPhone, and Windows apps do. At 4 days or more, the date is unchanged. That count is the time left until deletion, and the age wording is unchanged.
 
 An admin can change someone's role later, and can delete an account. Deleting an account deletes that person's items. The last admin cannot be demoted or deleted. If another admin exists, an admin can delete their own account.
 

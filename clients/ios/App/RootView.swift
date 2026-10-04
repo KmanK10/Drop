@@ -541,7 +541,23 @@ private struct ItemCard: View {
                 .font(.body.weight(.semibold))
                 .foregroundStyle(palette.ink)
                 .lineLimit(item.kind == "text" ? 4 : nil)
-            Text("\(item.detail) · \(item.when)").font(.footnote).foregroundStyle(palette.muted)
+            TimelineView(.everyMinute) { _ in
+                let expiresIn = DropFormat.daysLeft(
+                    createdAt: item.createdAt,
+                    ttlMs: model.account?.ttlMs ?? 0,
+                    nowMs: DropFormat.nowMs()
+                )
+                HStack(spacing: 0) {
+                    Text("\(item.detail) · \(item.when)")
+                        .font(.footnote)
+                        .foregroundStyle(palette.muted)
+                    if let expiresIn {
+                        Text(" · \(expiresIn)")
+                            .font(.footnote)
+                            .foregroundStyle(palette.danger)
+                    }
+                }
+            }
             if let preview = item.previewText, !preview.isEmpty {
                 Text(preview)
                     .font(.subheadline)
