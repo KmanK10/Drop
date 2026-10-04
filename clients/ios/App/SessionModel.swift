@@ -306,7 +306,7 @@ final class SessionModel: ObservableObject {
         if !enabled {
             BiometricStore.delete()
             biometricsOn = false
-            status = "Biometric unlock is off."
+            status = ""
             return
         }
         guard biometryAvailable else {
@@ -448,7 +448,7 @@ final class SessionModel: ObservableObject {
                 switch saved {
                 case .success:
                     self.biometricsOn = true
-                    self.status = "Biometric unlock is on."
+                    self.status = ""
                 case .canceled:
                     self.biometricsOn = BiometricStore.enrolled()
                 case .failed(let message):

@@ -51,9 +51,11 @@ private struct SignInView: View {
                 Text("Sign in")
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(palette.ink)
-                Text("The password unlocks items on this phone. It stays in memory until you close Drop, and it is not saved.")
-                    .font(.subheadline)
-                    .foregroundStyle(palette.muted)
+                if !model.biometricsOn {
+                    Text("The password unlocks items on this phone. It stays in memory until you close Drop, and it is not saved.")
+                        .font(.subheadline)
+                        .foregroundStyle(palette.muted)
+                }
                 field("Server", text: $model.server, secure: false, placeholder: "https://drop.example")
                 field("Username", text: $model.username, secure: false)
                 field("Password", text: $model.password, secure: true)
@@ -62,19 +64,28 @@ private struct SignInView: View {
                         .font(.footnote)
                         .foregroundStyle(palette.muted)
                 }
-                Notice()
+                if !model.error.isEmpty {
+                    Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
+                }
                 if model.biometricsOn {
-                    Button(model.busy ? "Unlocking…" : model.biometryLabel) {
+                    Button(model.status == "Unlocking…" ? "Unlocking…" : model.biometryLabel) {
                         model.unlockWithBiometrics()
                     }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(model.busy)
+                    Button(model.status == "Signing in…" ? "Signing in…" : "Use password") {
+                        model.signIn()
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(model.busy)
+                    .foregroundStyle(palette.ink)
+                } else {
+                    Button(model.status == "Signing in…" ? "Signing in…" : "Sign in") {
+                        model.signIn()
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(model.busy)
                 }
-                Button(model.busy ? "Signing in…" : "Sign in") {
-                    model.signIn()
-                }
-                .buttonStyle(PrimaryButtonStyle())
-                .disabled(model.busy)
                 Text("Accounts are invite-only. Ask the person who runs this Drop for a username. There is no public signup.")
                     .font(.footnote)
                     .foregroundStyle(palette.muted)
@@ -155,7 +166,7 @@ private struct ClipboardView: View {
                     Button("Choose a photo") { presentAdd(.photo) }
                     Button("Choose a file") { presentAdd(.file) }
                 } label: {
-                    PlusMark(ink: palette.ink, label: "Add")
+                    CircleMark(systemName: "plus", ink: palette.ink, label: "Add")
                 }
                 .menuOrder(.fixed)
                 .buttonStyle(.plain)
@@ -183,15 +194,10 @@ private struct ClipboardView: View {
                 ))
                 .disabled(model.busy)
                 .foregroundStyle(palette.ink)
-                Text("Off until you turn this on after signing in. Drop stores the content key in the keychain, not the password. Sign out removes it.")
+                Text(model.biometricsOn ? "On for next time." : "Off until you turn it on.")
                     .font(.caption)
                     .foregroundStyle(palette.muted)
             }
-            Text(model.biometricsOn
-                ? "Drop stays unlocked until you close the app. Sign out removes the keychain item."
-                : "Drop stays unlocked until you close the app. Closing it forgets the key.")
-                .font(.caption)
-                .foregroundStyle(palette.muted)
         }
         .fullScreenCover(isPresented: $takingPhoto) {
             CameraPicker(
@@ -384,22 +390,43 @@ private struct ItemCard: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(item.title).font(.body.weight(.semibold)).foregroundStyle(palette.ink)
             Text(item.detail).font(.footnote).foregroundStyle(palette.muted)
-            Menu {
+            HStack(spacing: 8) {
                 if item.canCopy {
                     Button("Copy") { model.copy(item) }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(palette.green)
+                        .buttonStyle(.plain)
+                        .disabled(model.busy)
                 }
-                Button("Share") { model.download(item) }
-                Button("Download") { model.saveFile(item) }
-                Button(model.pendingDelete == item.id ? "Delete now" : "Delete", role: model.pendingDelete == item.id ? .destructive : nil) {
+                Menu {
+                    if item.canCopy {
+                        Button("Copy") { model.copy(item) }
+                    }
+                    Button("Share") { model.download(item) }
+                    Button("Download") { model.saveFile(item) }
+                } label: {
+                    CircleMark(systemName: "plus", ink: palette.green, label: "Shortcuts")
+                }
+                .menuOrder(.fixed)
+                .buttonStyle(.plain)
+                .fixedSize()
+                .disabled(model.busy)
+                Spacer(minLength: 8)
+                Button {
                     model.delete(item)
+                } label: {
+                    let armed = model.pendingDelete == item.id
+                    CircleMark(
+                        systemName: "trash",
+                        ink: palette.danger,
+                        label: armed ? "Delete now" : "Delete",
+                        filled: armed,
+                        mark: palette.background
+                    )
                 }
-            } label: {
-                PlusMark(ink: palette.green, label: "Shortcuts")
+                .buttonStyle(.plain)
+                .disabled(model.busy)
             }
-            .menuOrder(.fixed)
-            .buttonStyle(.plain)
-            .fixedSize()
-            .disabled(model.busy)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -458,15 +485,23 @@ private struct PrimaryButtonStyle: ButtonStyle {
     }
 }
 
-private struct PlusMark: View {
+private struct CircleMark: View {
+    var systemName: String
     var ink: Color
     var label: String
+    var filled = false
+    var mark: Color?
 
     var body: some View {
-        Image(systemName: "plus")
+        Image(systemName: systemName)
             .font(.body.weight(.semibold))
-            .foregroundStyle(ink)
+            .foregroundStyle(filled ? (mark ?? ink) : ink)
             .frame(width: 36, height: 36)
+            .background {
+                if filled {
+                    Circle().fill(ink)
+                }
+            }
             .overlay(Circle().stroke(ink, lineWidth: 1.5))
             .contentShape(Circle())
             .accessibilityLabel(label)
