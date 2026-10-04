@@ -73,29 +73,4 @@ mod icon_tests {
         let hole = pixel(17, 6);
         assert!(hole.3 < 40, "hole in the clip {hole:?}");
     }
-
-    #[test]
-    fn touch_id_sign_in_glyph_is_a_circle_not_a_rounded_square() {
-        let size = 64u32;
-        let rgba = super::icon::drawn_touch_id_rgba(size);
-        assert!(super::icon::touch_id_glyph_is_circular(&rgba, size));
-        let pixel = |x: u32, y: u32| rgba[((y * size + x) * 4 + 3) as usize];
-        assert_eq!(pixel(1, 1), 0, "the square corner stays clear");
-        let center = size / 2;
-        assert!(pixel(center, 4) > 150, "the circle is drawn");
-        assert!(pixel(center, center) < 40, "the middle of the whorl is open");
-        let mut ridges = 0;
-        let mut gaps = 0;
-        for y in 20..44 {
-            if pixel(center, y) > 120 {
-                ridges += 1;
-            } else if pixel(center, y) < 30 {
-                gaps += 1;
-            }
-        }
-        assert!(ridges > 4, "fingerprint ridges {ridges}");
-        assert!(gaps > 4, "gaps between ridges {gaps}");
-        let shown = super::icon::touch_id_rgba(size);
-        assert!(super::icon::touch_id_glyph_is_circular(&shown, size));
-    }
 }

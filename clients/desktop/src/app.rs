@@ -1557,38 +1557,46 @@ fn touch_id_hardware() -> bool {
     false
 }
 
-/// Circular Touch ID fingerprint. The hit target stays 44 points.
-/// The glyph is a template, tinted with the text color for light and dark.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// Official SF Symbol `touchid`. The hit target stays 44 points.
+/// The symbol is a template, tinted with the text color for light and dark.
+#[cfg(target_os = "macos")]
 fn touch_id_icon(ui: &mut egui::Ui, ink: Color32, enabled: bool) -> egui::Response {
     let tap = 44.0;
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(tap), sense);
     if ui.is_rect_visible(rect) {
-        let tint = if enabled { ink } else { ink.gamma_multiply(0.45) };
-        let texture = touch_id_texture(ui.ctx());
-        let glyph = egui::Rect::from_center_size(rect.center(), Vec2::splat(28.0));
-        ui.painter().image(
-            texture.id(),
-            glyph,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            tint,
-        );
+        if let Some(texture) = touch_id_texture(ui.ctx()) {
+            let tint = if enabled { ink } else { ink.gamma_multiply(0.45) };
+            let glyph = egui::Rect::from_center_size(rect.center(), Vec2::splat(28.0));
+            ui.painter().image(
+                texture.id(),
+                glyph,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                tint,
+            );
+        }
     }
     response.on_hover_text("Unlock with Touch ID")
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn touch_id_texture(ctx: &egui::Context) -> egui::TextureHandle {
-    let id = egui::Id::new("drop-touch-id-glyph");
+#[cfg(target_os = "macos")]
+fn touch_id_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new("drop-touch-id-symbol");
+    let missing = egui::Id::new("drop-touch-id-symbol-missing");
     if let Some(handle) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
-        return handle;
+        return Some(handle);
     }
-    let rgba = crate::icon::touch_id_rgba(64);
-    let image = egui::ColorImage::from_rgba_unmultiplied([64, 64], &rgba);
-    let handle = ctx.load_texture("drop-touch-id-glyph", image, egui::TextureOptions::LINEAR);
+    if ctx.data(|data| data.get_temp::<bool>(missing).unwrap_or(false)) {
+        return None;
+    }
+    let Some(symbol) = crate::icon::touch_id_symbol() else {
+        ctx.data_mut(|data| data.insert_temp(missing, true));
+        return None;
+    };
+    let image = egui::ColorImage::from_rgba_unmultiplied([symbol.width, symbol.height], &symbol.rgba);
+    let handle = ctx.load_texture("drop-touch-id-symbol", image, egui::TextureOptions::LINEAR);
     ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
-    handle
+    Some(handle)
 }
 
 fn primary_button<'a>(label: &'a str, colors: &Palette) -> Button<'a> {
