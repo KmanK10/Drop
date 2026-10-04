@@ -1557,40 +1557,38 @@ fn touch_id_hardware() -> bool {
     false
 }
 
-/// Fingerprint in a rounded square, the same job as the iPhone `touchid` symbol.
-/// The hit target is 44 points. The drawing sits inside it.
+/// Circular Touch ID fingerprint. The hit target stays 44 points.
+/// The glyph is a template, tinted with the text color for light and dark.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn touch_id_icon(ui: &mut egui::Ui, ink: Color32, enabled: bool) -> egui::Response {
     let tap = 44.0;
     let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(tap), sense);
     if ui.is_rect_visible(rect) {
-        let paint = if enabled { ink } else { ink.gamma_multiply(0.45) };
-        let painter = ui.painter();
-        let center = rect.center();
-        let stroke = Stroke::new(1.6_f32, paint);
-        let glyph = egui::Rect::from_center_size(center, Vec2::splat(26.0));
-        painter.rect_stroke(glyph, egui::Rounding::same(6.0), stroke);
-        let origin = center + Vec2::new(0.0, 3.0);
-        for radius in [3.2_f32, 5.8, 8.4] {
-            fingerprint_ridge(painter, origin, radius, stroke);
-        }
+        let tint = if enabled { ink } else { ink.gamma_multiply(0.45) };
+        let texture = touch_id_texture(ui.ctx());
+        let glyph = egui::Rect::from_center_size(rect.center(), Vec2::splat(28.0));
+        ui.painter().image(
+            texture.id(),
+            glyph,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            tint,
+        );
     }
     response.on_hover_text("Unlock with Touch ID")
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn fingerprint_ridge(painter: &egui::Painter, center: egui::Pos2, radius: f32, stroke: Stroke) {
-    let steps = 18;
-    let start = std::f32::consts::PI;
-    let end = std::f32::consts::TAU;
-    let mut points = Vec::with_capacity(steps + 1);
-    for step in 0..=steps {
-        let t = step as f32 / steps as f32;
-        let angle = start + (end - start) * t;
-        points.push(center + Vec2::new(angle.cos(), angle.sin()) * radius);
+fn touch_id_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("drop-touch-id-glyph");
+    if let Some(handle) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return handle;
     }
-    painter.add(egui::Shape::line(points, stroke));
+    let rgba = crate::icon::touch_id_rgba(64);
+    let image = egui::ColorImage::from_rgba_unmultiplied([64, 64], &rgba);
+    let handle = ctx.load_texture("drop-touch-id-glyph", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
+    handle
 }
 
 fn primary_button<'a>(label: &'a str, colors: &Palette) -> Button<'a> {
