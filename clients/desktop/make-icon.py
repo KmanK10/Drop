@@ -1,37 +1,35 @@
 #!/usr/bin/env python3
-"""Draw Drop's app icon and write desktop/Drop.icns.
+"""Draw Drop's light and dark app icons into an asset catalog.
 
-A cream clipboard on a green field. The same shapes are drawn at every size
-so the mark still reads at 16px. macOS masks the square to a squircle.
+The clipboard mark is the same shape in both. The field behind it is light
+in the default icon and dark in the luminosity-dark icon, which is how macOS
+picks an appearance from CFBundleIconName. package-mac.sh compiles the catalog.
 """
 
+import json
 import struct
 import zlib
 from pathlib import Path
 
 GREEN = (0x1D, 0x68, 0x43)
-GREEN_DEEP = (0x14, 0x52, 0x33)
-CREAM = (0xF7, 0xF3, 0xEA)
-CLIP = (0x0E, 0x3D, 0x26)
+LIGHT_PLATE = (0xE6, 0xE2, 0xDA)
+LIGHT_PAGE = (0xFF, 0xFD, 0xF8)
+DARK_PLATE = (0x1C, 0x1C, 0x1E)
+DARK_PAGE = (0xF7, 0xF3, 0xEA)
 
-# OSType, pixel size. Retina sizes repeat a dimension under another type.
-ICNS_SIZES = (
-    (b"icp4", 16),
-    (b"icp5", 32),
-    (b"icp6", 64),
-    (b"ic07", 128),
-    (b"ic08", 256),
-    (b"ic09", 512),
-    (b"ic10", 1024),
-    (b"ic11", 32),
-    (b"ic12", 64),
-    (b"ic13", 256),
-    (b"ic14", 512),
+# size name, scale, pixels. 16@2x and 32@1x share a pixel size but are separate files.
+SLOTS = (
+    ("16x16", "1x", 16),
+    ("16x16", "2x", 32),
+    ("32x32", "1x", 32),
+    ("32x32", "2x", 64),
+    ("128x128", "1x", 128),
+    ("128x128", "2x", 256),
+    ("256x256", "1x", 256),
+    ("256x256", "2x", 512),
+    ("512x512", "1x", 512),
+    ("512x512", "2x", 1024),
 )
-
-
-def mix(a, b, t):
-    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
 def cover(distance, aa):
@@ -59,32 +57,30 @@ def over(dst, src, amount):
     return tuple(int(dst[i] * inv + src[i] * amount) for i in range(3)) + (255,)
 
 
-def draw(size):
-    """RGBA bytes, row-major, opaque."""
+def draw(size, plate, page):
+    """RGBA bytes. Plate is the icon field. Page, clip, and rules are the mark."""
     aa = 0.7 / size
     pixels = bytearray(size * size * 4)
-    # Lines need about two pixels or they vanish. Skip them on the smallest sizes.
     line_h = max(0.035, 2.2 / size)
     show_lines = size >= 32
     show_hole = size >= 32
     for y in range(size):
         ny = (y + 0.5) / size
-        background = mix(GREEN, GREEN_DEEP, ny)
         for x in range(size):
             nx = (x + 0.5) / size
-            color = (background[0], background[1], background[2], 255)
+            color = (plate[0], plate[1], plate[2], 255)
             paper = cover(round_box(nx, ny, 0.22, 0.30, 0.78, 0.84, 0.07), aa)
-            color = over(color, CREAM, paper)
+            color = over(color, page, paper)
             if show_lines and paper > 0.5:
                 for center in (0.46, 0.58, 0.70):
                     if 0.34 <= nx <= 0.66 and abs(ny - center) <= line_h / 2:
-                        color = over(color, GREEN, 0.92)
+                        color = over(color, GREEN, 0.95)
                         break
             clip = cover(round_box(nx, ny, 0.36, 0.18, 0.64, 0.42, 0.04), aa)
             if show_hole:
                 hole = cover(round_box(nx, ny, 0.44, 0.22, 0.56, 0.32, 0.035), aa)
                 clip *= 1 - hole
-            color = over(color, CLIP, clip)
+            color = over(color, GREEN, clip)
             i = (y * size + x) * 4
             pixels[i : i + 4] = bytes(color)
     return bytes(pixels)
@@ -99,40 +95,59 @@ def png(size, rgba):
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
 
 
-def icns(parts):
-    body = b"".join(tag + struct.pack(">I", 8 + len(data)) + data for tag, data in parts)
-    return b"icns" + struct.pack(">I", 8 + len(body)) + body
-
-
-def main():
-    here = Path(__file__).resolve().parent
-    parts = []
-    seen = {}
-    for tag, size in ICNS_SIZES:
-        rgba = seen.get(size)
-        if rgba is None:
-            rgba = draw(size)
-            seen[size] = rgba
-            check(size, rgba)
-        parts.append((tag, png(size, rgba)))
-    out = here / "Drop.icns"
-    blob = icns(parts)
-    out.write_bytes(blob)
-    print(f"wrote {out} ({len(blob)} bytes)")
-
-
-def check(size, rgba):
+def check(size, rgba, dark):
     def pixel(x, y):
         i = (y * size + x) * 4
         return rgba[i], rgba[i + 1], rgba[i + 2]
 
-    assert len(rgba) == size * size * 4, (size, len(rgba))
+    assert len(rgba) == size * size * 4
     corner = pixel(0, 0)
-    # Between the page rules, so a line does not fail the cream check.
-    paper = pixel(size // 2, int(size * 0.52))
-    # Corner is the green field. The middle of the page is cream.
-    assert corner[1] > corner[0] and corner[1] > 60, (size, corner)
-    assert paper[0] > 200 and paper[1] > 200 and paper[2] > 180, (size, paper)
+    page = pixel(size // 2, min(size - 1, int(size * 0.78)))
+    # Beside the clip hole, which shows the plate through the middle.
+    clip = pixel(max(0, int(size * 0.39)), max(0, int(size * 0.28)))
+    if dark:
+        assert corner[0] < 50 and corner[1] < 50 and corner[2] < 55, (size, corner)
+    else:
+        assert corner[0] > 200 and corner[1] > 200 and corner[2] > 190, (size, corner)
+    assert page[0] > 220 and page[1] > 210, (size, page)
+    assert clip[1] > clip[0] + 20 and clip[1] > 70, (size, clip)
+
+
+def main():
+    here = Path(__file__).resolve().parent
+    iconset = here / "Assets.xcassets" / "AppIcon.appiconset"
+    iconset.mkdir(parents=True, exist_ok=True)
+    images = []
+    cache = {}
+    for size_name, scale, pixels in SLOTS:
+        for dark, suffix in ((False, ""), (True, "-dark")):
+            key = (pixels, dark)
+            rgba = cache.get(key)
+            if rgba is None:
+                plate = DARK_PLATE if dark else LIGHT_PLATE
+                page = DARK_PAGE if dark else LIGHT_PAGE
+                rgba = draw(pixels, plate, page)
+                check(pixels, rgba, dark)
+                cache[key] = rgba
+            if scale == "1x":
+                stem = f"icon_{size_name}{suffix}"
+            else:
+                stem = f"icon_{size_name}@{scale}{suffix}"
+            (iconset / f"{stem}.png").write_bytes(png(pixels, rgba))
+            entry = {
+                "filename": f"{stem}.png",
+                "idiom": "mac",
+                "scale": scale,
+                "size": size_name,
+            }
+            if dark:
+                entry["appearances"] = [{"appearance": "luminosity", "value": "dark"}]
+            images.append(entry)
+    contents = {"images": images, "info": {"author": "xcode", "version": 1}}
+    (iconset / "Contents.json").write_text(json.dumps(contents, indent=2) + "\n")
+    catalog = iconset.parent / "Contents.json"
+    catalog.write_text(json.dumps({"info": {"author": "xcode", "version": 1}}, indent=2) + "\n")
+    print(f"wrote {iconset} ({len(images)} images)")
 
 
 if __name__ == "__main__":

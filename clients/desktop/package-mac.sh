@@ -13,7 +13,28 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/drop "$app/Contents/MacOS/Drop"
 chmod +x "$app/Contents/MacOS/Drop"
 cp desktop/Info.plist "$app/Contents/Info.plist"
-cp desktop/Drop.icns "$app/Contents/Resources/Drop.icns"
+# Light and dark icons live in the asset catalog. actool writes Assets.car,
+# which Launchpad, the Dock, and Finder select from CFBundleIconName.
+if ! command -v xcrun >/dev/null 2>&1; then
+  echo "xcrun actool is required to compile the light and dark app icon. Install Xcode or the command line tools." >&2
+  exit 1
+fi
+xcrun actool \
+  desktop/Assets.xcassets \
+  --compile "$app/Contents/Resources" \
+  --platform macosx \
+  --minimum-deployment-target 12.0 \
+  --app-icon AppIcon \
+  --output-partial-info-plist "$stage/Assets.plist"
+test -f "$app/Contents/Resources/Assets.car"
+# Keep any icon filename actool recorded, so it matches the file it just wrote.
+if [ -f "$stage/Assets.plist" ]; then
+  iconfile=$(plutil -extract CFBundleIconFile raw "$stage/Assets.plist" 2>/dev/null || true)
+  if [ -n "$iconfile" ]; then
+    plutil -replace CFBundleIconFile -string "$iconfile" "$app/Contents/Info.plist" 2>/dev/null \
+      || plutil -insert CFBundleIconFile -string "$iconfile" "$app/Contents/Info.plist"
+  fi
+fi
 # Eight-byte bundle signature so Finder treats this as an application.
 printf 'APPL????' > "$app/Contents/PkgInfo"
 
