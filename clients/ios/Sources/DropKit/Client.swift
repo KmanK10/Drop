@@ -76,7 +76,7 @@ public final class DropClient: @unchecked Sendable {
     }
 
     public func signIn(username: String, password: String) throws -> DropSnapshot {
-        let name = try normalizeUsername(username)
+        let name = try Self.normalizeUsername(username)
         if password.isEmpty { throw DropError.emptyPassword }
         if DropCrypto.normalizePassword(password).count > 200 { throw DropError.longPassword }
         wipe()

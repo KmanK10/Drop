@@ -39,7 +39,7 @@ public struct DropSettings: Equatable {
         return settings
     }
 
-    public func save(to url: URL = fileURL()) throws {
+    public func save(to url: URL = Self.fileURL()) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let object: [String: String] = ["serverUrl": serverURL, "username": username]
         let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
