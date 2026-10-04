@@ -99,7 +99,12 @@ private struct SignInView: View {
                     if !model.error.isEmpty {
                         Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
                     }
-                    signInRow(pin: true)
+                    if model.biometricsOn {
+                        HStack {
+                            Spacer(minLength: 8)
+                            biometricMark
+                        }
+                    }
                     usePasswordButton
                     setupButton
                 } else {
@@ -108,7 +113,10 @@ private struct SignInView: View {
                     if !model.error.isEmpty {
                         Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
                     }
-                    signInRow(pin: false)
+                    signInRow
+                    if model.pinOn {
+                        usePinButton
+                    }
                     setupButton
                 }
             }
@@ -140,12 +148,10 @@ private struct SignInView: View {
         }
     }
 
-    private func signInRow(pin: Bool) -> some View {
+    private var signInRow: some View {
         HStack(alignment: .center, spacing: 12) {
             Button(model.status == "Signing in…" ? "Signing in…" : "Sign in") {
-                if pin {
-                    model.submitPin()
-                } else if model.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if model.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     model.error = "Enter your password."
                 } else {
                     model.signIn()
@@ -154,20 +160,25 @@ private struct SignInView: View {
             .buttonStyle(PrimaryButtonStyle())
             .disabled(model.busy)
             Spacer(minLength: 8)
-            if model.biometricsOn {
-                Button {
-                    model.unlockWithBiometrics()
-                } label: {
-                    Image(systemName: model.biometrySymbol)
-                        .font(.system(size: 28))
-                        .foregroundStyle(palette.ink)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                        .accessibilityLabel(model.biometryLabel)
-                }
-                .buttonStyle(.plain)
-                .disabled(model.busy)
+            biometricMark
+        }
+    }
+
+    @ViewBuilder
+    private var biometricMark: some View {
+        if model.biometricsOn {
+            Button {
+                model.unlockWithBiometrics()
+            } label: {
+                Image(systemName: model.biometrySymbol)
+                    .font(.system(size: 28))
+                    .foregroundStyle(palette.ink)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel(model.biometryLabel)
             }
+            .buttonStyle(.plain)
+            .disabled(model.busy)
         }
     }
 
@@ -177,6 +188,17 @@ private struct SignInView: View {
             model.password = ""
             model.error = ""
             usePassword = true
+        }
+        .disabled(model.busy)
+        .foregroundStyle(palette.ink)
+    }
+
+    private var usePinButton: some View {
+        Button("Use PIN") {
+            model.password = ""
+            model.pinEntry = ""
+            model.error = ""
+            usePassword = false
         }
         .disabled(model.busy)
         .foregroundStyle(palette.ink)
@@ -645,11 +667,8 @@ private struct SettingsView: View {
                     field("Current password", text: $current)
                     field("New password", text: $next)
                     field("Confirm new password", text: $confirm)
-                    if model.pinOn {
-                        field("Current PIN", text: $currentPin, keyboard: .numberPad)
-                    }
                     Button(model.settingsBusy.isEmpty ? "Save" : model.settingsBusy) {
-                        model.changePassword(current: current, next: next, confirm: confirm, pin: currentPin)
+                        model.changePassword(current: current, next: next, confirm: confirm)
                     }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(model.busy)

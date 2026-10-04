@@ -356,7 +356,7 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    func changePassword(current: String, next: String, confirm: String, pin: String) {
+    func changePassword(current: String, next: String, confirm: String) {
         settingsError = ""
         settingsStatus = ""
         if current.isEmpty {
@@ -379,21 +379,16 @@ final class SessionModel: ObservableObject {
                     DispatchQueue.main.async { self?.settingsBusy = message }
                 }
                 let hadPin = PinStore.enrolled()
-                let pinKept = hadPin ? Self.rewriteStoredPin(client: client, pin: pin) : true
+                if hadPin {
+                    PinStore.delete()
+                }
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.show(snapshot, status: "")
                     self.settingsBusy = ""
                     self.settingsError = ""
-                    if hadPin && !pinKept {
-                        self.pinOn = false
-                        self.settingsStatus = "Password changed. PIN is off."
-                    } else {
-                        if hadPin {
-                            self.pinOn = true
-                        }
-                        self.settingsStatus = "Password changed."
-                    }
+                    self.pinOn = PinStore.enrolled()
+                    self.settingsStatus = hadPin ? "Password changed. PIN is off." : "Password changed."
                     self.passwordChangeDone += 1
                     self.formDone += 1
                     if self.biometricsOn {
@@ -440,21 +435,6 @@ final class SessionModel: ObservableObject {
             PinStore.delete()
             pinOn = false
         }
-    }
-
-    func submitPin() {
-        let pin = pinEntry.trimmingCharacters(in: .whitespacesAndNewlines)
-        if pin.isEmpty {
-            error = "Enter your PIN."
-            return
-        }
-        if let problem = DropPin.rejection(pin, confirm: nil) {
-            error = problem
-            return
-        }
-        pinWait?.cancel()
-        pinUnlockTicket += 1
-        startPinUnlock(pin, ticket: pinUnlockTicket)
     }
 
     func notePinEntry() {
@@ -701,37 +681,6 @@ final class SessionModel: ObservableObject {
                 self?.status = ""
             }
         }
-    }
-
-    /// Re-wrap the new content key with the same PIN. A blank or wrong PIN turns PIN unlock off.
-    private static func rewriteStoredPin(client: DropClient, pin: String) -> Bool {
-        guard DropPin.rejection(pin, confirm: nil) == nil, let stored = PinStore.load() else {
-            PinStore.delete()
-            return false
-        }
-        var openedBytes = (try? DropPin.unwrap(pin: pin, blob: Array(stored))) ?? []
-        var plain = Data(openedBytes)
-        for index in openedBytes.indices {
-            openedBytes[index] = 0
-        }
-        openedBytes.removeAll()
-        let opened = !plain.isEmpty
-        wipe(&plain)
-        guard opened else {
-            PinStore.delete()
-            return false
-        }
-        guard let exported = try? client.exportUnlock(), !exported.isEmpty else {
-            PinStore.delete()
-            return false
-        }
-        var secret = exported
-        defer { wipe(&secret) }
-        guard let wrapped = try? DropPin.wrap(pin: pin, secret: Array(secret)), PinStore.save(Data(wrapped)) else {
-            PinStore.delete()
-            return false
-        }
-        return true
     }
 
     private func refreshStoredUnlock(ticket: Int, dropStaleOnFailure: Bool = false) {
