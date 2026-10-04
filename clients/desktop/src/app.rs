@@ -143,6 +143,10 @@ struct DropApp {
     quit: bool,
     pending_drops: Vec<PathBuf>,
     biometrics: bool,
+    /// This Mac has Touch ID. Cached so the sign-in icon does not ask every frame.
+    /// Windows does not draw that icon.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    touch_available: bool,
     tried_biometrics: bool,
     refresh_biometrics: bool,
     biometric_epoch: u64,
@@ -211,6 +215,7 @@ impl DropApp {
             quit: false,
             pending_drops: Vec::new(),
             biometrics: biometric::enrolled(),
+            touch_available: touch_id_hardware(),
             tried_biometrics: false,
             refresh_biometrics: false,
             biometric_epoch: 0,
@@ -892,7 +897,7 @@ impl DropApp {
             self.pin_field(ui);
             self.http_note(ui);
             notice(ui, &self.error, &self.status);
-            self.biometric_button(ui);
+            self.biometric_unlock(ui, &colors, false);
             self.use_password_button(ui);
             self.setup_button(ui);
         } else {
@@ -900,12 +905,52 @@ impl DropApp {
             self.http_note(ui);
             notice(ui, &self.error, &self.status);
             ui.add_space(8.0);
-            self.sign_in_button(ui, &colors);
-            self.biometric_button(ui);
+            self.biometric_unlock(ui, &colors, true);
             if self.pin_on {
                 self.use_pin_button(ui);
             }
             self.setup_button(ui);
+        }
+    }
+
+    /// Password sign-in puts Touch ID to the right of Sign in. The PIN screen
+    /// has no Sign in button, so the same icon sits on the right by itself.
+    /// Windows Hello stays a labeled button.
+    fn biometric_unlock(&mut self, ui: &mut egui::Ui, colors: &Palette, beside_sign_in: bool) {
+        #[cfg(target_os = "macos")]
+        {
+            let show = touch_id_icon_visible(self.touch_available, self.biometrics);
+            if beside_sign_in {
+                ui.horizontal(|ui| {
+                    self.sign_in_button(ui, colors);
+                    if show {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            self.touch_id_button(ui, colors.ink);
+                        });
+                    }
+                });
+            } else if show {
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        self.touch_id_button(ui, colors.ink);
+                    });
+                });
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if beside_sign_in {
+                self.sign_in_button(ui, colors);
+            }
+            self.biometric_button(ui);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn touch_id_button(&mut self, ui: &mut egui::Ui, ink: Color32) {
+        let mark = touch_id_icon(ui, ink, !self.busy);
+        if mark.clicked() {
+            self.unlock_with_biometrics();
         }
     }
 
@@ -1495,6 +1540,59 @@ fn row_mark(ui: &mut egui::Ui, mark: RowMark, ink: Color32) -> egui::Response {
     response
 }
 
+/// The sign-in icon is the unlock control. It is not the menu checkmark,
+/// which turns Touch ID on and off.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn touch_id_icon_visible(available: bool, enrolled: bool) -> bool {
+    available && enrolled
+}
+
+#[cfg(target_os = "macos")]
+fn touch_id_hardware() -> bool {
+    biometric::available()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn touch_id_hardware() -> bool {
+    false
+}
+
+/// Fingerprint in a rounded square, the same job as the iPhone `touchid` symbol.
+/// The hit target is 44 points. The drawing sits inside it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn touch_id_icon(ui: &mut egui::Ui, ink: Color32, enabled: bool) -> egui::Response {
+    let tap = 44.0;
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(tap), sense);
+    if ui.is_rect_visible(rect) {
+        let paint = if enabled { ink } else { ink.gamma_multiply(0.45) };
+        let painter = ui.painter();
+        let center = rect.center();
+        let stroke = Stroke::new(1.6_f32, paint);
+        let glyph = egui::Rect::from_center_size(center, Vec2::splat(26.0));
+        painter.rect_stroke(glyph, egui::Rounding::same(6.0), stroke);
+        let origin = center + Vec2::new(0.0, 3.0);
+        for radius in [3.2_f32, 5.8, 8.4] {
+            fingerprint_ridge(painter, origin, radius, stroke);
+        }
+    }
+    response.on_hover_text("Unlock with Touch ID")
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn fingerprint_ridge(painter: &egui::Painter, center: egui::Pos2, radius: f32, stroke: Stroke) {
+    let steps = 18;
+    let start = std::f32::consts::PI;
+    let end = std::f32::consts::TAU;
+    let mut points = Vec::with_capacity(steps + 1);
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let angle = start + (end - start) * t;
+        points.push(center + Vec2::new(angle.cos(), angle.sin()) * radius);
+    }
+    painter.add(egui::Shape::line(points, stroke));
+}
+
 fn primary_button<'a>(label: &'a str, colors: &Palette) -> Button<'a> {
     Button::new(RichText::new(label).color(colors.on_green))
         .fill(colors.green)
@@ -1539,6 +1637,19 @@ fn write_clipboard(payload: CopyPayload) -> Result<(), String> {
             bytes.zeroize();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod touch_id_sign_in_tests {
+    use super::touch_id_icon_visible;
+
+    #[test]
+    fn icon_shows_only_when_touch_id_exists_and_is_on() {
+        assert!(!touch_id_icon_visible(false, false));
+        assert!(!touch_id_icon_visible(false, true));
+        assert!(!touch_id_icon_visible(true, false));
+        assert!(touch_id_icon_visible(true, true));
     }
 }
 
