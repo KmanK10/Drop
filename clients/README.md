@@ -33,6 +33,8 @@ The window's close button hides Drop. Quit is the control that ends the process 
 
 The window follows the system appearance, the same way the website follows `prefers-color-scheme`. Light mode stays the cream palette. Dark mode uses the website's dark colors. The Mac menu-bar icon is a template image, so the menu bar already adapts.
 
+Each clipboard row has Copy beside a circled +. That menu holds Copy and Download. A red trash mark in a matching circle deletes the item on one click.
+
 Config paths, server address and username only:
 
 - Windows: `%APPDATA%\Drop\config.json`
@@ -84,7 +86,7 @@ The screen follows the system appearance, with the same cream and dark colors as
 
 The home-screen icon is the same clipboard as the Mac app, including the light plate and the dark plate. `desktop/make-icon.py` writes both 1024 pictures into `ios/App/Assets.xcassets/AppIcon.appiconset`. The dark picture is the `luminosity: dark` appearance. iOS masks the square.
 
-The + button, in a circle, opens from the button: take a photo, choose a photo, or choose a file. Each of those is encrypted and uploaded the same way as a picked file. Each clipboard row has Copy beside that circled +, which still holds Copy, Share, and Download. A red trash icon in a matching circle sits on the other side and asks for a second tap before it deletes. Face ID or Touch ID, after you turn it on, is one unlock button. The line under the switch is only "On for next time." or "Off until you turn it on."
+The + button, in a circle, opens from the button: take a photo, choose a photo, or choose a file. Each of those is encrypted and uploaded the same way as a picked file. Each clipboard row has Copy beside that circled +, which still holds Copy, Share, and Download. A red trash icon in a matching circle sits on the other side and deletes on one tap. Under the Face ID or Touch ID switch, one line says the password stays on this phone and that unlock can open Drop next time.
 
 Add items from the share sheet or with Paste. The share extension only copies the file into the app-group inbox (`group.com.kiefermenard.drop`) and opens `dropclipboard://inbox`. It does not have the content key and does not upload. The running app encrypts the file and then deletes the inbox copy. If Drop was not signed in, the file waits in the inbox until you sign in.
 

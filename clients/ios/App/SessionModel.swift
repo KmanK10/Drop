@@ -18,10 +18,10 @@ final class SessionModel: ObservableObject {
     @Published var shareURL: URL?
     @Published var exportData: Data?
     @Published var exportName = "file"
-    @Published var pendingDelete: String?
     @Published var biometricsOn = false
     @Published var biometryAvailable = false
     @Published var biometryLabel = "Unlock with Face ID"
+    @Published var biometryName = "Face ID"
 
     private var triedBiometrics = false
     private var biometricTicket = 0
@@ -38,6 +38,7 @@ final class SessionModel: ObservableObject {
         let kind = BiometricStore.kind()
         biometryAvailable = kind != .none
         biometryLabel = kind.label
+        biometryName = kind.name
         biometricsOn = BiometricStore.enrolled()
     }
 
@@ -86,7 +87,6 @@ final class SessionModel: ObservableObject {
         client = nil
         account = nil
         items = []
-        pendingDelete = nil
         work.async { [weak self] in
             current?.signOut()
             DispatchQueue.main.async {
@@ -327,11 +327,6 @@ final class SessionModel: ObservableObject {
     }
 
     func delete(_ item: DropItem) {
-        if pendingDelete != item.id {
-            pendingDelete = item.id
-            return
-        }
-        pendingDelete = nil
         guard let client else { return }
         busy = true
         work.async { [weak self] in

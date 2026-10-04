@@ -194,7 +194,7 @@ private struct ClipboardView: View {
                 ))
                 .disabled(model.busy)
                 .foregroundStyle(palette.ink)
-                Text(model.biometricsOn ? "On for next time." : "Off until you turn it on.")
+                Text("The password stays on this phone, and \(model.biometryName) can unlock next time.")
                     .font(.caption)
                     .foregroundStyle(palette.muted)
             }
@@ -415,14 +415,7 @@ private struct ItemCard: View {
                 Button {
                     model.delete(item)
                 } label: {
-                    let armed = model.pendingDelete == item.id
-                    CircleMark(
-                        systemName: "trash",
-                        ink: palette.danger,
-                        label: armed ? "Delete now" : "Delete",
-                        filled: armed,
-                        mark: palette.background
-                    )
+                    CircleMark(systemName: "trash", ink: palette.danger, label: "Delete")
                 }
                 .buttonStyle(.plain)
                 .disabled(model.busy)

@@ -16,6 +16,15 @@ enum BiometricKind {
         case .none: return "Unlock with biometrics"
         }
     }
+
+    var name: String {
+        switch self {
+        case .faceID: return "Face ID"
+        case .touchID: return "Touch ID"
+        case .opticID: return "Optic ID"
+        case .none: return "biometrics"
+        }
+    }
 }
 
 enum BiometricLoad {

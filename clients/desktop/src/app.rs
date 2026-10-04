@@ -130,7 +130,6 @@ struct DropApp {
     error: String,
     busy: bool,
     quit: bool,
-    pending_delete: Option<String>,
     pending_drops: Vec<PathBuf>,
     biometrics: bool,
     biometric_available: bool,
@@ -178,7 +177,6 @@ impl DropApp {
             error: String::new(),
             busy: false,
             quit: false,
-            pending_delete: None,
             pending_drops: Vec::new(),
             biometrics: biometric::enrolled(),
             biometric_available: biometric::available(),
@@ -343,7 +341,6 @@ impl DropApp {
             WorkerEvent::SignedOut => {
                 self.account = None;
                 self.items.clear();
-                self.pending_delete = None;
                 self.busy = false;
                 self.status.clear();
                 self.http = self.server.trim().starts_with("http://");
@@ -645,28 +642,48 @@ impl DropApp {
             .show(ui, |ui| {
                 ui.label(RichText::new(&item.title).strong().color(colors.ink));
                 ui.label(RichText::new(format!("{} · {}", item.detail, item.when)).color(colors.muted).size(12.0));
-                ui.horizontal(|ui| {
-                    if item.can_copy && ui.add_enabled(!self.busy, Button::new("Copy")).clicked() {
-                        self.busy = true;
-                        self.error.clear();
-                        self.send(Command::Copy(item.id.clone()));
-                    }
-                    if ui.add_enabled(!self.busy, Button::new("Download")).clicked() {
-                        self.busy = true;
-                        self.error.clear();
-                        self.send(Command::Download(item.id.clone()));
-                    }
-                    let confirming = self.pending_delete.as_deref() == Some(item.id.as_str());
-                    let label = if confirming { "Delete now" } else { "Delete" };
-                    if ui.add_enabled(!self.busy, Button::new(label)).clicked() {
-                        if confirming {
-                            self.pending_delete = None;
+                ui.push_id(&item.id, |ui| {
+                    ui.horizontal(|ui| {
+                        if item.can_copy
+                            && ui
+                                .add_enabled(!self.busy, Button::new(RichText::new("Copy").color(colors.green)))
+                                .clicked()
+                        {
                             self.busy = true;
-                            self.send(Command::Delete(item.id.clone()));
-                        } else {
-                            self.pending_delete = Some(item.id.clone());
+                            self.error.clear();
+                            self.send(Command::Copy(item.id.clone()));
                         }
-                    }
+                        ui.add_enabled_ui(!self.busy, |ui| {
+                            let menu_id = ui.id().with("shortcuts");
+                            let mut bar = egui::menu::BarState::load(ui.ctx(), menu_id);
+                            let plus = row_mark(ui, RowMark::Plus, colors.green).on_hover_text("Shortcuts");
+                            bar.bar_menu(&plus, |ui| {
+                                if item.can_copy && ui.button("Copy").clicked() {
+                                    ui.close_menu();
+                                    self.busy = true;
+                                    self.error.clear();
+                                    self.send(Command::Copy(item.id.clone()));
+                                }
+                                if ui.button("Download").clicked() {
+                                    ui.close_menu();
+                                    self.busy = true;
+                                    self.error.clear();
+                                    self.send(Command::Download(item.id.clone()));
+                                }
+                            });
+                            bar.store(ui.ctx(), menu_id);
+                        });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_enabled_ui(!self.busy, |ui| {
+                                let trash = row_mark(ui, RowMark::Trash, colors.danger).on_hover_text("Delete");
+                                if trash.clicked() {
+                                    self.busy = true;
+                                    self.error.clear();
+                                    self.send(Command::Delete(item.id.clone()));
+                                }
+                            });
+                        });
+                    });
                 });
             });
     }
@@ -834,6 +851,36 @@ fn labeled(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
         edit = edit.hint_text(hint);
     }
     ui.add(edit);
+}
+
+enum RowMark {
+    Plus,
+    Trash,
+}
+
+/// A circled mark in the same family as the iPhone row buttons.
+fn row_mark(ui: &mut egui::Ui, mark: RowMark, ink: Color32) -> egui::Response {
+    let size = 28.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let center = rect.center();
+        let stroke = Stroke::new(1.5_f32, ink);
+        painter.circle_stroke(center, size * 0.5 - 1.0, stroke);
+        match mark {
+            RowMark::Plus => {
+                painter.hline(center.x - 5.0..=center.x + 5.0, center.y, stroke);
+                painter.vline(center.x, center.y - 5.0..=center.y + 5.0, stroke);
+            }
+            RowMark::Trash => {
+                painter.hline(center.x - 5.5..=center.x + 5.5, center.y - 4.0, stroke);
+                painter.hline(center.x - 2.0..=center.x + 2.0, center.y - 6.2, stroke);
+                let body = egui::Rect::from_center_size(center + Vec2::new(0.0, 2.2), Vec2::new(9.0, 8.0));
+                painter.rect_stroke(body, egui::Rounding::same(1.0), stroke);
+            }
+        }
+    }
+    response
 }
 
 fn primary_button<'a>(label: &'a str, colors: &Palette) -> Button<'a> {
