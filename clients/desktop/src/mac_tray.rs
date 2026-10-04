@@ -622,7 +622,7 @@ unsafe fn item_is_separator(item: *mut AnyObject) -> bool {
         return false;
     }
     let separator: Bool = msg_send![item, isSeparatorItem];
-    separator == Bool::YES
+    separator.as_bool()
 }
 
 unsafe fn make_item(title: &str, action: Sel, checked: bool) -> *mut AnyObject {

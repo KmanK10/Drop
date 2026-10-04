@@ -31,7 +31,7 @@ On Windows it adds a notification-area icon. On Mac a menu-bar icon is always th
 
 Explorer paints the Windows icon, so a file drop is caught by a small layered window that appears over the icon only while a drag is already in progress. A click that starts on the icon still opens Drop.
 
-The window's close button hides Drop while Close to menu bar or Close to notification area is on. Quit, in the Mac application menu or the Windows notification-area menu, ends the process. On Windows 11 the icon can land in the notification-area overflow; drag it onto the visible row if you want it beside the clock.
+The window's close button hides Drop while Close to menu bar or Close to notification area is on. On Mac, Command-W does the same thing as that close button. Quit, in the Mac application menu or the Windows notification-area menu, ends the process. On Windows 11 the icon can land in the notification-area overflow; drag it onto the visible row if you want it beside the clock.
 
 Touch ID stores the unlock blob in the data protection keychain, which is the keychain that can require Touch ID. The password is not stored. Sign out still deletes the item. An unsigned local build has no keychain-access-groups entitlement, so macOS rejects that save (usually keychain error -34018). There is no public call that keeps the item biometric-gated and still succeeds on an unsigned binary. This environment cannot make the keychain call, so that failure is not something this tree has watched succeed.
 

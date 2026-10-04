@@ -508,6 +508,23 @@ impl DropApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
+    /// The window close button. On Mac, Command-W uses this too.
+    fn dismiss_main_window(&mut self, ctx: &Context) {
+        if self.quit {
+            return;
+        }
+        if crate::window_prefs::close_to_menu_bar() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // Fully closed: menu bar or notification area only. A minimized
+            // window stays in the Dock, because minimize does not request close.
+            #[cfg(target_os = "macos")]
+            crate::mac_tray::set_dock_icon_visible(false);
+        } else {
+            self.request_quit(ctx);
+        }
+    }
+
     fn set_biometrics(&mut self, enabled: bool) {
         if self.busy {
             return;
@@ -1172,7 +1189,13 @@ impl DropApp {
             egui::ViewportId::from_hash_of("drop-account-form"),
             builder,
             |ui_ctx, class| {
-                if class != egui::ViewportClass::Embedded && ui_ctx.input(|input| input.viewport().close_requested()) {
+                #[cfg(target_os = "macos")]
+                let close_shortcut = class != egui::ViewportClass::Embedded && command_w_pressed(ui_ctx);
+                #[cfg(not(target_os = "macos"))]
+                let close_shortcut = false;
+                if class != egui::ViewportClass::Embedded
+                    && (ui_ctx.input(|input| input.viewport().close_requested()) || close_shortcut)
+                {
                     self.close_form();
                     ui_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     return;
@@ -1265,17 +1288,13 @@ impl eframe::App for DropApp {
             self.tried_biometrics = true;
             self.unlock_with_biometrics();
         }
-        if ctx.input(|input| input.viewport().close_requested()) && !self.quit {
-            if crate::window_prefs::close_to_menu_bar() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                // Fully closed: menu bar or notification area only. A minimized
-                // window stays in the Dock, because minimize does not request close.
-                #[cfg(target_os = "macos")]
-                crate::mac_tray::set_dock_icon_visible(false);
-            } else {
-                self.request_quit(ctx);
-            }
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        #[cfg(target_os = "macos")]
+        let close_shortcut = command_w_pressed(ctx);
+        #[cfg(not(target_os = "macos"))]
+        let close_shortcut = false;
+        if close_requested || close_shortcut {
+            self.dismiss_main_window(ctx);
         }
         CentralPanel::default().show(ctx, |ui| {
             if self.account.is_some() {
@@ -1310,6 +1329,38 @@ fn close_note() -> &'static str {
     } else {
         "Closing this window keeps Drop in the notification area."
     }
+}
+
+/// Command-W, with no Shift, Option, or Control. Consumed so a text field does not also take it.
+#[cfg(target_os = "macos")]
+fn command_w_pressed(ctx: &Context) -> bool {
+    ctx.input_mut(|input| {
+        let hit = input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::W,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.command && !modifiers.shift && !modifiers.alt && !modifiers.ctrl
+            )
+        });
+        if hit {
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::W,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.command && !modifiers.shift && !modifiers.alt && !modifiers.ctrl
+                )
+            });
+        }
+        hit
+    })
 }
 
 fn show_window(ctx: &Context) {
