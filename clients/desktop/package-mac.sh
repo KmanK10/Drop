@@ -155,4 +155,5 @@ hdiutil convert "$scratch" -format UDZO -ov -o "${out%.dmg}" >/dev/null
 echo "Built $out"
 echo "Open it with: open \"$out\""
 echo "Drag Drop onto Applications, then open Drop from the Applications folder."
-echo "It stays in the menu bar. Opening the bare executable under target/ launches Terminal; use the disk image instead."
+echo "The menu-bar icon stays up. The Dock icon is there while the window is open or minimized; drop a file on it to upload. Closing the window removes the Dock icon."
+echo "Opening the bare executable under target/ launches Terminal; use the disk image instead."

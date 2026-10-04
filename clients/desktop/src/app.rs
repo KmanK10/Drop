@@ -568,6 +568,10 @@ impl eframe::App for DropApp {
         if ctx.input(|input| input.viewport().close_requested()) && !self.quit {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // Fully closed: menu bar only. A minimized window stays in the Dock,
+            // because minimize does not request close.
+            #[cfg(target_os = "macos")]
+            crate::mac_tray::set_dock_icon_visible(false);
         }
         CentralPanel::default().show(ctx, |ui| {
             if self.account.is_some() {
@@ -588,6 +592,7 @@ impl eframe::App for DropApp {
 }
 
 fn show_window(ctx: &Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     #[cfg(target_os = "macos")]

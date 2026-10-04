@@ -1,5 +1,11 @@
-//! Menu-bar icon. A file dropped on the icon uploads to the signed-in account.
-//! Clicking the icon opens the window. This file is compiled on macOS only.
+//! Menu-bar icon, plus a Dock icon while the window is open or minimized.
+//!
+//! Clicking the menu-bar icon opens the window. A file dropped on the menu-bar
+//! icon still uploads when macOS delivers the drag. Mission Control takes most
+//! drags at the top of the screen, so the Dock icon is the drop target: macOS
+//! sends those files as an open-documents Apple Event. Closing the window
+//! (back to the menu bar only) removes the Dock icon. This file is compiled
+//! on macOS only.
 
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -45,9 +51,26 @@ pub fn start(wake: impl Fn() + Send + 'static) -> Result<TrayPorts, String> {
 }
 
 pub fn activate() {
+    set_dock_icon_visible(true);
+}
+
+/// Regular policy shows the Dock icon. Accessory policy removes it and leaves
+/// the menu-bar icon. `LSUIElement` is only the state before the first call.
+pub fn set_dock_icon_visible(visible: bool) {
     unsafe {
         let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let _: Bool = msg_send![app, activateIgnoringOtherApps: Bool::YES];
+        if app.is_null() {
+            return;
+        }
+        if visible {
+            // NSApplicationActivationPolicyRegular
+            let _: Bool = msg_send![app, setActivationPolicy: 0isize];
+            let _: () = msg_send![app, unhide: std::ptr::null_mut::<AnyObject>()];
+            let _: Bool = msg_send![app, activateIgnoringOtherApps: Bool::YES];
+        } else {
+            // NSApplicationActivationPolicyAccessory
+            let _: Bool = msg_send![app, setActivationPolicy: 1isize];
+        }
     }
 }
 
@@ -69,10 +92,6 @@ fn claim_single_instance() -> bool {
 }
 
 unsafe fn install_status_item() -> Result<(), String> {
-    let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-    // NSApplicationActivationPolicyAccessory hides the Dock icon.
-    let _: Bool = msg_send![app, setActivationPolicy: 1isize];
-
     let target_class = status_target_class();
     let target: *mut AnyObject = msg_send![target_class, new];
     if target.is_null() {
@@ -107,7 +126,28 @@ unsafe fn install_status_item() -> Result<(), String> {
     subclass_button_for_drops(button);
     let types = dragged_types();
     let _: () = msg_send![button, registerForDraggedTypes: types];
+    register_dock_drops(target);
+    // The window is already open on this first frame, so the Dock icon comes up
+    // with it. Hiding the window later switches back to the accessory policy.
+    set_dock_icon_visible(true);
     Ok(())
+}
+
+unsafe fn register_dock_drops(target: *mut AnyObject) {
+    let manager: *mut AnyObject = msg_send![class!(NSAppleEventManager), sharedAppleEventManager];
+    if manager.is_null() {
+        return;
+    }
+    // kCoreEventClass / kAEOpenDocuments. A file dropped on the Dock icon arrives
+    // as this event. Info.plist lists public.item at rank None so the drop is
+    // accepted and Drop is not offered as the opener for every file.
+    let _: () = msg_send![
+        manager,
+        setEventHandler: target
+        andSelector: sel!(handleOpenDocuments:withReplyEvent:)
+        forEventClass: u32::from_be_bytes(*b"aevt")
+        andEventID: u32::from_be_bytes(*b"odoc")
+    ];
 }
 
 unsafe fn set_template_image(button: *mut AnyObject) {
@@ -140,6 +180,10 @@ unsafe fn status_target_class() -> &'static AnyClass {
             menu_sign_out as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
         builder.add_method(sel!(menuQuit:), menu_quit as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject));
+        builder.add_method(
+            sel!(handleOpenDocuments:withReplyEvent:),
+            handle_open_documents as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject),
+        );
         builder.register()
     })
 }
@@ -202,6 +246,18 @@ extern "C" fn prepare_drag(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyOb
 
 extern "C" fn dragging_exited(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {}
 
+extern "C" fn handle_open_documents(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    event: *mut AnyObject,
+    _reply: *mut AnyObject,
+) {
+    let paths = unsafe { paths_from_open_event(event) };
+    if !paths.is_empty() {
+        emit(TrayAction::Dropped(paths));
+    }
+}
+
 extern "C" fn perform_drag(_this: *mut AnyObject, _cmd: Sel, sender: *mut AnyObject) -> Bool {
     let paths = unsafe { paths_from_drag(sender) };
     if paths.is_empty() {
@@ -232,6 +288,42 @@ unsafe fn add_item(menu: *mut AnyObject, title: &str, action: Sel) {
         let _: () = msg_send![item, setTarget: target];
     }
     let _: () = msg_send![menu, addItem: item];
+}
+
+unsafe fn paths_from_open_event(event: *mut AnyObject) -> Vec<PathBuf> {
+    if event.is_null() {
+        return Vec::new();
+    }
+    // keyDirectObject
+    let direct: *mut AnyObject = msg_send![event, paramDescriptorForKeyword: u32::from_be_bytes(*b"----")];
+    if direct.is_null() {
+        return Vec::new();
+    }
+    let count: isize = msg_send![direct, numberOfItems];
+    let mut paths = Vec::new();
+    if count > 0 {
+        for index in 1..=count {
+            let item: *mut AnyObject = msg_send![direct, descriptorAtIndex: index];
+            if let Some(path) = path_from_descriptor(item) {
+                paths.push(path);
+            }
+        }
+    } else if let Some(path) = path_from_descriptor(direct) {
+        paths.push(path);
+    }
+    paths
+}
+
+unsafe fn path_from_descriptor(item: *mut AnyObject) -> Option<PathBuf> {
+    if item.is_null() {
+        return None;
+    }
+    let url: *mut AnyObject = msg_send![item, fileURLValue];
+    if url.is_null() {
+        return None;
+    }
+    let path: *mut AnyObject = msg_send![url, path];
+    ns_to_string(path).map(PathBuf::from)
 }
 
 unsafe fn paths_from_drag(sender: *mut AnyObject) -> Vec<PathBuf> {

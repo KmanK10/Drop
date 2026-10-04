@@ -23,7 +23,7 @@ The server field starts empty. Type the address of your own Drop server. The pla
 
 The desktop app is Rust (egui). One window works on Windows and Mac. The content key lives on a worker thread, not in the UI, and not in the config file.
 
-On Windows it adds a notification-area icon. On Mac it adds a menu-bar icon and hides the Dock icon. Drag a file onto that icon to upload it to the signed-in account. Click the icon to open the window, where you can copy or download items, paste text, or pick a file. On Mac, right-click the icon for Open, Sign out, and Quit. On Windows, right-click the icon for the same menu.
+On Windows it adds a notification-area icon. On Mac a menu-bar icon is always there; click it to open the window. While that window is open or minimized, Drop also has a Dock icon. Closing the window hides it back to the menu bar and the Dock icon goes away. Drag a file onto the Dock icon to upload it. A drag onto the menu-bar icon still uploads when macOS delivers it; Mission Control takes most drags at the top of the screen, so the Dock icon is the one to use. On Mac, right-click the menu-bar icon for Open, Sign out, and Quit. On Windows, right-click the notification icon for the same menu, and drag a file onto that icon to upload it.
 
 Explorer paints the Windows icon, so a file drop is caught by a small layered window that appears over the icon only while a drag is already in progress. A click that starts on the icon still opens Drop.
 
@@ -58,7 +58,7 @@ cd clients
 open target/release/Drop.dmg
 ```
 
-`open` mounts the image. Drag Drop onto the Applications folder in that window, then open Drop from Applications. Replace an older Drop that is already in Applications. It is a menu-bar app (`LSUIElement`), so it does not stay in the Dock. The window follows the Mac appearance.
+`open` mounts the image. Drag Drop onto the Applications folder in that window, then open Drop from Applications. Replace an older Drop that is already in Applications. The menu-bar icon stays for the life of the process. The Dock icon is there while the window is open or minimized, and it leaves when the window is closed back to the menu bar. Drop a file on the Dock icon to upload it. The window follows the Mac appearance.
 
 The app icon follows it too. `desktop/Assets.xcassets` has the clipboard on a light field and, with a `luminosity: dark` appearance, on a dark field. `desktop/AppIcon.icon` is the Icon Composer document current `actool` actually compiles into separate Aqua and DarkAqua renditions: the same mark, with the light plate as the default fill and the dark plate as the dark fill. `package-mac.sh` compiles both into `Assets.car`. `CFBundleIconName` is `AppIcon`. The script does not set `CFBundleIconFile` and deletes any `.icns` `actool` writes, because an icns is the light picture only and Launchpad prefers it over the dark rendition. If Launchpad still shows the previous tile after you replace the app, refresh Launch Services:
 
@@ -68,7 +68,7 @@ The app icon follows it too. `desktop/Assets.xcassets` has the clipboard on a li
 
 Rebuild the pictures with `python3 desktop/make-icon.py` only if you change the drawing (`python3 desktop/make-icon.py --check` reads the luminances and appearances back). `actool` comes with Xcode or its command line tools.
 
-Do not double-click the executable inside `target/`. Finder runs that bare file in Terminal, and the path is several folders down. `cargo run --release -p drop-desktop` also works while you are developing; the process sets the accessory activation policy itself.
+Do not double-click the executable inside `target/`. Finder runs that bare file in Terminal, and the path is several folders down. `cargo run --release -p drop-desktop` also works while you are developing. The process shows the Dock icon while the window is open and removes it when the window is closed.
 
 This Linux environment cannot compile or run the Mac tray, and it cannot build the disk image (`hdiutil` is a Mac tool). The AppKit drop target and the image still need a Mac.
 
