@@ -19,6 +19,8 @@ mod window_prefs;
 #[cfg(target_os = "macos")]
 mod mac_tray;
 #[cfg(target_os = "windows")]
+mod win_menu;
+#[cfg(target_os = "windows")]
 mod win_tray;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod worker;
