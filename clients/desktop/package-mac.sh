@@ -9,10 +9,11 @@ stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
 app="$stage/Drop.app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/drop "$app/Contents/MacOS/Drop"
 chmod +x "$app/Contents/MacOS/Drop"
 cp desktop/Info.plist "$app/Contents/Info.plist"
+cp desktop/Drop.icns "$app/Contents/Resources/Drop.icns"
 # Eight-byte bundle signature so Finder treats this as an application.
 printf 'APPL????' > "$app/Contents/PkgInfo"
 

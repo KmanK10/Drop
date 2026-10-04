@@ -10,6 +10,8 @@
 	<string>com.kiefermenard.drop.mac</string>
 	<key>CFBundleExecutable</key>
 	<string>Drop</string>
+	<key>CFBundleIconFile</key>
+	<string>Drop</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
