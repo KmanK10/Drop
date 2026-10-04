@@ -1,45 +1,71 @@
 #!/usr/bin/env python3
-"""Pack the light Drop app icons into a Windows .ico.
+"""Build Drop.ico for the Windows taskbar and the exe.
 
-The pictures are the same PNGs the Mac asset catalog uses. Windows stores
-one icon on the file, so this is the light plate. The window itself still
-follows the system appearance.
+The clipboard is the same mark as the Mac app icon, on the light plate.
+The tile is a rounded square with transparent corners, so the taskbar
+button matches the other rounded icons instead of a sharp square. The
+notification-area glyph is a separate white clipboard and is not this file.
 """
 
+import importlib.util
 import struct
 import sys
+import zlib
 from pathlib import Path
 
-SIZES = (
-    (16, "icon_16x16.png"),
-    (32, "icon_32x32.png"),
-    (64, "icon_32x32@2x.png"),
-    (128, "icon_128x128.png"),
-    (256, "icon_256x256.png"),
-)
+SIZES = (16, 32, 64, 128, 256)
+RADIUS = 0.30
 
 
-def png_size(data: bytes) -> tuple[int, int]:
-    if data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
-        raise SystemExit("An app icon PNG is not a PNG.")
-    width, height = struct.unpack(">II", data[16:24])
-    return width, height
+def load_drawer():
+    path = Path(__file__).resolve().with_name("make-icon.py")
+    spec = importlib.util.spec_from_file_location("drop_make_icon", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: make-windows-icon.py Drop.ico")
-    here = Path(__file__).resolve().parent
-    iconset = here / "Assets.xcassets" / "AppIcon.appiconset"
-    images: list[tuple[int, bytes]] = []
-    for expected, name in SIZES:
-        data = (iconset / name).read_bytes()
-        width, height = png_size(data)
-        if width != expected or height != expected:
-            raise SystemExit(f"{name} is {width}x{height}, expected {expected}")
-        images.append((width, data))
+def png(size, rgba):
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
-    out = Path(sys.argv[1])
+    raw = b"".join(b"\x00" + rgba[y * size * 4 : (y + 1) * size * 4] for y in range(size))
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+
+
+def rounded(drawer, size):
+    rgba = bytearray(drawer.draw(size, drawer.LIGHT_PLATE, drawer.LIGHT_PAGE))
+    aa = 0.7 / size
+    for y in range(size):
+        ny = (y + 0.5) / size
+        for x in range(size):
+            nx = (x + 0.5) / size
+            plate = drawer.cover(drawer.round_box(nx, ny, 0.0, 0.0, 1.0, 1.0, RADIUS), aa)
+            index = (y * size + x) * 4
+            if plate <= 0:
+                rgba[index : index + 4] = b"\x00\x00\x00\x00"
+            else:
+                rgba[index + 3] = max(0, min(255, int(round(plate * 255))))
+    return bytes(rgba)
+
+
+def check(size, rgba):
+    def pixel(x, y):
+        index = (y * size + x) * 4
+        return rgba[index : index + 4]
+
+    assert pixel(0, 0)[3] == 0, (size, "top left")
+    assert pixel(size - 1, 0)[3] == 0, (size, "top right")
+    assert pixel(0, size - 1)[3] == 0, (size, "bottom left")
+    assert pixel(size - 1, size - 1)[3] == 0, (size, "bottom right")
+    edge = pixel(size // 2, 0)
+    assert edge[3] > 200, (size, "top edge", edge)
+    center = pixel(size // 2, size // 2)
+    assert center[3] == 255, (size, "center", center)
+
+
+def pack(images):
     header = struct.pack("<HHH", 0, 1, len(images))
     entries = b""
     payload = b""
@@ -49,8 +75,21 @@ def main() -> None:
         entries += struct.pack("<BBBBHHII", stored, stored, 0, 0, 1, 32, len(data), offset)
         payload += data
         offset += len(data)
+    return header + entries + payload
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: make-windows-icon.py Drop.ico")
+    drawer = load_drawer()
+    images = []
+    for size in SIZES:
+        rgba = rounded(drawer, size)
+        check(size, rgba)
+        images.append((size, png(size, rgba)))
+    out = Path(sys.argv[1])
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(header + entries + payload)
+    out.write_bytes(pack(images))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,12 @@ mod app;
 mod icon;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod tray;
+#[cfg(target_os = "windows")]
+mod options;
+#[cfg(all(test, not(target_os = "windows")))]
+mod options;
+#[cfg(all(test, not(any(target_os = "windows", target_os = "macos"))))]
+mod tray;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod pin;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -72,5 +78,42 @@ mod icon_tests {
         assert!(clip.3 > 200, "clip {clip:?}");
         let hole = pixel(17, 6);
         assert!(hole.3 < 40, "hole in the clip {hole:?}");
+    }
+
+    #[test]
+    fn notification_icon_is_a_white_clipboard() {
+        let size = 36u32;
+        let rgba = super::icon::notification_rgba(size);
+        let pixel = |x: u32, y: u32| {
+            let index = ((y * size + x) * 4) as usize;
+            (rgba[index], rgba[index + 1], rgba[index + 2], rgba[index + 3])
+        };
+        assert_eq!(pixel(1, 18).3, 0, "beside the page");
+        let page = pixel(17, 28);
+        assert_eq!((page.0, page.1, page.2), (255, 255, 255));
+        assert!(page.3 > 200, "page {page:?}");
+        let clip = pixel(12, 8);
+        assert_eq!((clip.0, clip.1, clip.2), (255, 255, 255));
+        assert!(clip.3 > 200, "clip {clip:?}");
+    }
+
+    #[test]
+    fn taskbar_icon_corners_are_transparent() {
+        let size = 64u32;
+        let rgba = super::icon::taskbar_rgba(size);
+        let pixel = |x: u32, y: u32| {
+            let index = ((y * size + x) * 4) as usize;
+            (rgba[index], rgba[index + 1], rgba[index + 2], rgba[index + 3])
+        };
+        assert_eq!(pixel(0, 0).3, 0, "top left");
+        assert_eq!(pixel(size - 1, 0).3, 0, "top right");
+        assert_eq!(pixel(0, size - 1).3, 0, "bottom left");
+        assert_eq!(pixel(size - 1, size - 1).3, 0, "bottom right");
+        let edge = pixel(size / 2, 0);
+        assert!(edge.3 > 200, "middle of the top edge stays on the tile {edge:?}");
+        let page = pixel(size / 2, (size as f32 * 0.78) as u32);
+        assert!(page.3 > 200 && page.0 > 220, "page {page:?}");
+        let center = pixel(size / 2, size / 2);
+        assert_eq!(center.3, 255, "the tile is opaque inside the rounded square");
     }
 }

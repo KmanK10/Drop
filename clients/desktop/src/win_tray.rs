@@ -16,8 +16,8 @@ use windows::Win32::Foundation::{
     WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
+    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, InvalidateRect, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER,
+    BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
 };
 use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -31,18 +31,22 @@ use windows::Win32::UI::Shell::{
     NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4, NOTIFY_ICON_DATA_FLAGS,
     NOTIFY_ICON_MESSAGE,
 };
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    MF_CHECKED, MF_SEPARATOR,
-    DispatchMessageW, GetCursorPos, GetMessageW, PostMessageW, PostQuitMessage, RegisterClassW,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow, TrackPopupMenu,
-    TranslateMessage, UnhookWindowsHookEx, DestroyIcon, HHOOK, HICON, HMENU, ICONINFO, LWA_ALPHA, MB_ICONINFORMATION,
-    MB_OK, MF_STRING, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, TPM_BOTTOMALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTALIGN, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU,
-    WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_USER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowTextW,
+    GetWindowThreadProcessId, ICON_BIG, IsIconic, MF_CHECKED, MF_SEPARATOR, MB_ICONINFORMATION, MB_OK, MF_STRING, MSG,
+    MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage,
+    UnhookWindowsHookEx, DestroyIcon, HHOOK, HICON, HMENU, ICONINFO, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN,
+    TPM_RIGHTBUTTON, WH_MOUSE_LL, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
+    WM_RBUTTONUP, WM_SETICON, WM_USER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_LBUTTON, VK_MENU,
+};
 
 use crate::icon;
 use crate::tray::{TrayAction, TrayPorts};
@@ -50,6 +54,7 @@ use crate::tray::{TrayAction, TrayPorts};
 const CALLBACK: u32 = WM_APP + 1;
 const TIP_MSG: u32 = WM_APP + 2;
 const QUIT_MSG: u32 = WM_APP + 3;
+const SHOW_MENU: u32 = WM_APP + 4;
 const ID_OPEN: usize = 1;
 const ID_HELLO: usize = 2;
 const ID_PIN: usize = 3;
@@ -90,8 +95,11 @@ struct Shared {
     overlay: SendHandle,
     icon: SendHandle,
     was_inside: bool,
+    button_was_down: bool,
+    menu_open: bool,
     drag: bool,
     last_open: Option<Instant>,
+    last_menu: Option<Instant>,
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
@@ -178,21 +186,24 @@ fn tray_thread(tx: Sender<TrayAction>, wake: impl Fn() + Send + 'static, ready: 
             ..Default::default()
         };
         RegisterClassW(&class);
+        // A real (invisible) window, not a 0×0 hidden one. TrackPopupMenu only
+        // returns the chosen item when this window can become the foreground.
         let message = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            WS_EX_TOOLWINDOW | WS_EX_LAYERED,
             class_name,
-            w!("Drop"),
-            WINDOW_STYLE::default(),
+            w!("Drop notification"),
+            WS_POPUP,
             0,
             0,
-            0,
-            0,
+            1,
+            1,
             None,
             None,
             instance,
             None,
         )
         .map_err(|error| error.to_string())?;
+        let _ = SetLayeredWindowAttributes(message, COLORREF(0), 1, LWA_ALPHA);
         let overlay_class = w!("DropTrayOverlay");
         let overlay_wc = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
@@ -244,8 +255,11 @@ fn tray_thread(tx: Sender<TrayAction>, wake: impl Fn() + Send + 'static, ready: 
             overlay: pack_hwnd(overlay),
             icon: pack_icon(icon),
             was_inside: false,
+            button_was_down: false,
+            menu_open: false,
             drag: false,
             last_open: None,
+            last_menu: None,
         });
         let _ = ready.send(Ok(pack_hwnd(message)));
 
@@ -286,8 +300,13 @@ fn write_utf16(buf: &mut [u16], text: &str) {
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == CALLBACK {
-        // NOTIFYICON_VERSION_4 packs the mouse message in the low word.
-        on_icon_event((lparam.0 as u32) & 0xFFFF);
+        // NOTIFYICON_VERSION_4 packs the mouse message in the low word of lParam.
+        // Older shells put the mouse message in lParam itself. Accept either.
+        on_icon_event(hwnd, notify_event(wparam, lparam));
+        return LRESULT(0);
+    }
+    if msg == SHOW_MENU {
+        show_tray_menu(hwnd);
         return LRESULT(0);
     }
     if msg == TIP_MSG {
@@ -304,50 +323,89 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
-fn on_icon_event(event: u32) {
-    let mut guard = SHARED.lock().expect("tray");
-    let Some(shared) = guard.as_mut() else {
+fn notify_event(wparam: WPARAM, lparam: LPARAM) -> u32 {
+    let low = (lparam.0 as u32) & 0xFFFF;
+    let high = ((lparam.0 as u32) >> 16) & 0xFFFF;
+    let from_w = (wparam.0 as u32) & 0xFFFF;
+    for code in [low, high, from_w, lparam.0 as u32] {
+        if is_open_click(code) || is_menu_click(code) {
+            return code;
+        }
+    }
+    low
+}
+
+fn is_open_click(event: u32) -> bool {
+    event == NIN_SELECT || event == NIN_KEYSELECT || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK
+}
+
+fn is_menu_click(event: u32) -> bool {
+    event == WM_CONTEXTMENU || event == WM_RBUTTONUP
+}
+
+fn on_icon_event(hwnd: HWND, event: u32) {
+    if is_open_click(event) {
+        let mut guard = SHARED.lock().expect("tray");
+        let Some(shared) = guard.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        if shared.last_open.is_some_and(|then| now.duration_since(then) < Duration::from_millis(300)) {
+            return;
+        }
+        shared.last_open = Some(now);
+        drop(guard);
+        deliver(TrayAction::Open);
         return;
-    };
-    match event {
-        NIN_SELECT | NIN_KEYSELECT | WM_LBUTTONUP => {
-            let now = Instant::now();
-            if shared.last_open.is_some_and(|then| now.duration_since(then) < Duration::from_millis(300)) {
-                return;
-            }
-            shared.last_open = Some(now);
-            let _ = shared.tx.send(TrayAction::Open);
-            (shared.wake)();
+    }
+    if is_menu_click(event) {
+        // Show the menu on a later message. Calling TrackPopupMenu from the
+        // shell callback returns no choice: the click never lands on an item.
+        unsafe {
+            let _ = PostMessageW(hwnd, SHOW_MENU, WPARAM(0), LPARAM(0));
         }
-        WM_CONTEXTMENU | WM_RBUTTONUP => {
-            let tx = shared.tx.clone();
-            let wake = shared.wake.as_ref() as *const dyn Fn();
-            let hwnd = unpack_hwnd(shared.message);
-            drop(guard);
-            if let Some(action) = popup_menu(hwnd) {
-                let mut guard = SHARED.lock().expect("tray");
-                if let Some(shared) = guard.as_mut() {
-                    let _ = shared.tx.send(action);
-                    (shared.wake)();
-                }
-                let _ = (tx, wake);
-            }
-        }
-        _ => {}
     }
 }
 
-fn clipboard_icon(size: u32) -> Vec<u8> {
-    let mut rgba = icon::menu_bar_rgba(size);
-    for pixel in rgba.chunks_mut(4) {
-        if pixel[3] == 0 {
-            continue;
+fn show_tray_menu(hwnd: HWND) {
+    {
+        let mut guard = SHARED.lock().expect("tray");
+        let Some(shared) = guard.as_mut() else {
+            return;
+        };
+        let now = Instant::now();
+        if shared.last_menu.is_some_and(|then| now.duration_since(then) < Duration::from_millis(400)) {
+            return;
         }
-        pixel[0] = 0x1d;
-        pixel[1] = 0x68;
-        pixel[2] = 0x43;
+        shared.last_menu = Some(now);
+        shared.menu_open = true;
     }
-    rgba
+    let action = popup_menu(hwnd);
+    if let Ok(mut guard) = SHARED.lock() {
+        if let Some(shared) = guard.as_mut() {
+            shared.menu_open = false;
+        }
+    }
+    if let Some(action) = action {
+        deliver(action);
+    }
+}
+
+/// Put the choice on the UI thread, and show the main window first. A hidden
+/// window does not paint, so a repaint posted while it is hidden never runs
+/// and the click looks like it did nothing.
+fn deliver(action: TrayAction) {
+    reveal_main_window();
+    let guard = SHARED.lock().expect("tray");
+    let Some(shared) = guard.as_ref() else {
+        return;
+    };
+    let _ = shared.tx.send(action);
+    (shared.wake)();
+}
+
+fn clipboard_icon(size: u32) -> Vec<u8> {
+    icon::notification_rgba(size)
 }
 
 fn append_separator(menu: HMENU) {
@@ -357,37 +415,33 @@ fn append_separator(menu: HMENU) {
 fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
-        let _ = AppendMenuW(menu, MF_STRING, ID_OPEN, w!("Open"));
+        let open = wide("Open");
+        let _ = AppendMenuW(menu, MF_STRING, ID_OPEN, PCWSTR(open.as_ptr()));
         append_separator(menu);
-        let close_flags = if crate::window_prefs::close_to_menu_bar() {
-            MF_STRING | MF_CHECKED
-        } else {
-            MF_STRING
-        };
-        let _ = AppendMenuW(menu, close_flags, ID_CLOSE, w!("Close to notification area"));
-        append_separator(menu);
-        if crate::biometric::available() {
-            let flags = if crate::biometric::enrolled() { MF_STRING | MF_CHECKED } else { MF_STRING };
-            let _ = AppendMenuW(menu, flags, ID_HELLO, w!("Windows Hello"));
+        for entry in crate::options::windows_menu(
+            crate::biometric::available(),
+            crate::biometric::enrolled(),
+            crate::pin::enrolled(),
+            crate::window_prefs::close_to_menu_bar(),
+        ) {
+            match entry {
+                crate::options::WindowsEntry::Divider => append_separator(menu),
+                crate::options::WindowsEntry::Command { label, command, checked } => {
+                    let flags = if checked { MF_STRING | MF_CHECKED } else { MF_STRING };
+                    let text = wide(label);
+                    let _ = AppendMenuW(menu, flags, command_id(command), PCWSTR(text.as_ptr()));
+                }
+            }
         }
-        if crate::pin::enrolled() {
-            let _ = AppendMenuW(menu, MF_STRING | MF_CHECKED, ID_PIN, w!("PIN"));
-            let _ = AppendMenuW(menu, MF_STRING, ID_CHANGE_PIN, w!("Change PIN"));
-        } else {
-            let _ = AppendMenuW(menu, MF_STRING, ID_PIN, w!("Set PIN"));
-        }
-        let _ = AppendMenuW(menu, MF_STRING, ID_PASSWORD, w!("Change password"));
-        append_separator(menu);
-        let _ = AppendMenuW(menu, MF_STRING, ID_SIGNOUT, w!("Sign out"));
-        let _ = AppendMenuW(menu, MF_STRING, ID_DELETE, w!("Delete account"));
-        append_separator(menu);
-        let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, w!("Quit"));
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
-        let _ = SetForegroundWindow(hwnd);
+        // Park the owner on the cursor. A hidden window cannot take the
+        // foreground, and TrackPopupMenu then closes without a choice.
+        let _ = SetWindowPos(hwnd, None, point.x, point.y, 1, 1, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        prepare_foreground(hwnd);
         let picked = TrackPopupMenu(
             menu,
-            TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+            TPM_RIGHTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
             point.x,
             point.y,
             0,
@@ -395,6 +449,7 @@ fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
             None,
         );
         let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = ShowWindow(hwnd, SW_HIDE);
         let _ = DestroyMenu(menu);
         match picked.0 as usize {
             ID_OPEN => Some(TrayAction::Open),
@@ -410,6 +465,43 @@ fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
             }
             ID_QUIT => Some(TrayAction::Quit),
             _ => None,
+        }
+    }
+}
+
+fn command_id(command: crate::options::WindowsOption) -> usize {
+    match command {
+        crate::options::WindowsOption::CloseToNotification => ID_CLOSE,
+        crate::options::WindowsOption::Hello => ID_HELLO,
+        crate::options::WindowsOption::Pin => ID_PIN,
+        crate::options::WindowsOption::ChangePin => ID_CHANGE_PIN,
+        crate::options::WindowsOption::ChangePassword => ID_PASSWORD,
+        crate::options::WindowsOption::SignOut => ID_SIGNOUT,
+        crate::options::WindowsOption::DeleteAccount => ID_DELETE,
+        crate::options::WindowsOption::Quit => ID_QUIT,
+    }
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Windows ignores SetForegroundWindow unless this thread recently received
+/// input. A tray click belongs to Explorer, so pretend an Alt tap happened,
+/// then attach to the foreground thread and activate `hwnd`.
+fn prepare_foreground(hwnd: HWND) {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let foreground_thread = GetWindowThreadProcessId(foreground, None);
+        let our_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != our_thread
+            && AttachThreadInput(our_thread, foreground_thread, true).as_bool();
+        keybd_event(VK_MENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+        let _ = SetForegroundWindow(hwnd);
+        if attached {
+            let _ = AttachThreadInput(our_thread, foreground_thread, false);
         }
     }
 }
@@ -439,14 +531,17 @@ fn track_drag(point: POINT) {
     let Some(shared) = guard.as_mut() else {
         return;
     };
+    let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
     let Some(rect) = icon_rect(unpack_hwnd(shared.message)) else {
+        shared.button_was_down = down;
+        shared.was_inside = false;
         return;
     };
     let inside = point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom;
-    let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) < 0 };
-    let entered = inside && !shared.was_inside && down;
+    let cover = !shared.menu_open && crate::tray::drag_should_cover(shared.was_inside, shared.button_was_down, inside, down);
+    shared.button_was_down = down;
     shared.was_inside = inside;
-    if entered {
+    if cover {
         show_overlay(unpack_hwnd(shared.overlay), rect);
     } else if !down && !shared.drag {
         hide_overlay(unpack_hwnd(shared.overlay));
@@ -667,6 +762,97 @@ fn hdrop_from(medium: &STGMEDIUM) -> Option<windows::Win32::UI::Shell::HDROP> {
 
 const NIN_SELECT: u32 = WM_USER;
 const NIN_KEYSELECT: u32 = WM_USER + 1;
+
+/// Show the main window from the tray thread. The UI thread also marks it
+/// visible; this call is what makes a hidden window able to paint at all.
+pub fn reveal_main_window() {
+    let Some(hwnd) = find_main_window() else {
+        return;
+    };
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
+        prepare_foreground(hwnd);
+        let _ = InvalidateRect(hwnd, None, BOOL(0));
+    }
+}
+
+static TASKBAR_ICON: Mutex<Option<SendHandle>> = Mutex::new(None);
+static TASKBAR_APPLIED: Mutex<u32> = Mutex::new(0);
+
+/// The taskbar button uses the big icon. The title bar keeps the green D,
+/// which eframe installs as the small icon. Reapply for a short while so a
+/// later frame cannot put the green D back on the taskbar.
+pub fn apply_taskbar_icon() {
+    if *TASKBAR_APPLIED.lock().expect("taskbar count") > 60 {
+        return;
+    }
+    let Some(hwnd) = find_main_window() else {
+        return;
+    };
+    let Some(icon) = taskbar_hicon() else {
+        return;
+    };
+    unsafe {
+        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(unpack_icon(icon).0 as isize));
+    }
+    *TASKBAR_APPLIED.lock().expect("taskbar count") += 1;
+}
+
+fn taskbar_hicon() -> Option<SendHandle> {
+    if let Some(icon) = TASKBAR_ICON.lock().expect("taskbar icon").as_ref().copied() {
+        return Some(icon);
+    }
+    let rgba = icon::taskbar_rgba(256);
+    let icon = icon_from_rgba(256, 256, &rgba).ok()?;
+    let packed = pack_icon(icon);
+    *TASKBAR_ICON.lock().expect("taskbar icon") = Some(packed);
+    Some(packed)
+}
+
+fn find_main_window() -> Option<HWND> {
+    let mut found: Option<HWND> = None;
+    unsafe {
+        let _ = EnumWindows(Some(enum_main_window), LPARAM(&mut found as *mut Option<HWND> as isize));
+    }
+    found
+}
+
+unsafe extern "system" fn enum_main_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let slot = &mut *(lparam.0 as *mut Option<HWND>);
+    let mut pid = 0u32;
+    let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid != GetCurrentProcessId() {
+        return BOOL(1);
+    }
+    let class = window_string(hwnd, true);
+    if class == "DropTrayWindow" || class == "DropTrayOverlay" {
+        return BOOL(1);
+    }
+    if window_string(hwnd, false) == "Drop" {
+        *slot = Some(hwnd);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+fn window_string(hwnd: HWND, class_name: bool) -> String {
+    let mut buf = [0u16; 64];
+    let len = unsafe {
+        if class_name {
+            GetClassNameW(hwnd, &mut buf)
+        } else {
+            GetWindowTextW(hwnd, &mut buf)
+        }
+    };
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
+}
 
 #[allow(dead_code)]
 fn _keep_types_imported() {

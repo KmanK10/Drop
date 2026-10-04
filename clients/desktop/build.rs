@@ -17,7 +17,7 @@ fn main() {
         return;
     }
     println!("cargo:rerun-if-changed=make-windows-icon.py");
-    println!("cargo:rerun-if-changed=Assets.xcassets/AppIcon.appiconset");
+    println!("cargo:rerun-if-changed=make-icon.py");
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));

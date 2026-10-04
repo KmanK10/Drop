@@ -853,7 +853,7 @@ impl DropApp {
 
     fn sign_in_ui(&mut self, ui: &mut egui::Ui) {
         let colors = colors(ui);
-        wordmark(ui);
+        self.heading(ui);
         ui.add_space(8.0);
         ui.label(RichText::new("Sign in").size(18.0).strong().color(colors.ink));
         let setup = self.show_setup || !self.returning;
@@ -1066,7 +1066,7 @@ impl DropApp {
             return;
         };
         let _ = ctx;
-        wordmark(ui);
+        self.heading(ui);
         let colors = colors(ui);
         ui.label(
             RichText::new(format!(
@@ -1335,6 +1335,8 @@ impl DropApp {
 
 impl eframe::App for DropApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "windows")]
+        crate::win_tray::apply_taskbar_icon();
         #[cfg(target_os = "macos")]
         crate::mac_tray::refresh_command_menus();
         self.pump(ctx);
@@ -1425,6 +1427,8 @@ fn show_window(ctx: &Context) {
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     #[cfg(target_os = "macos")]
     crate::mac_tray::activate();
+    #[cfg(target_os = "windows")]
+    crate::win_tray::reveal_main_window();
 }
 
 fn apply_style(ctx: &Context) {
@@ -1474,22 +1478,97 @@ fn paint(theme: egui::Theme, palette: Palette) -> egui::Visuals {
     visuals
 }
 
+impl DropApp {
+    /// The row under the title bar. On Windows, Options sits on the right of
+    /// that row. It is the window's Drop menu. Open is not on it.
+    fn heading(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            wordmark(ui);
+            self.options_menu(ui);
+        });
+    }
+
+    fn options_menu(&mut self, ui: &mut egui::Ui) {
+        #[cfg(target_os = "windows")]
+        {
+            let colors = colors(ui);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.menu_button(RichText::new("Options").color(colors.ink), |ui| {
+                    ui.set_min_width(240.0);
+                    let entries = crate::options::windows_menu(
+                        crate::biometric::available(),
+                        crate::biometric::enrolled(),
+                        crate::pin::enrolled(),
+                        crate::window_prefs::close_to_menu_bar(),
+                    );
+                    for entry in entries {
+                        match entry {
+                            crate::options::WindowsEntry::Divider => {
+                                ui.separator();
+                            }
+                            crate::options::WindowsEntry::Command { label, command, checked } => {
+                                if option_row(ui, label, checked) {
+                                    self.on_windows_option(ui.ctx(), command);
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (self, ui);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn on_windows_option(&mut self, ctx: &Context, command: crate::options::WindowsOption) {
+        let action = match command {
+            crate::options::WindowsOption::CloseToNotification => {
+                crate::window_prefs::toggle();
+                ctx.request_repaint();
+                return;
+            }
+            crate::options::WindowsOption::Hello => TrayAction::SetBiometric(!crate::biometric::enrolled()),
+            crate::options::WindowsOption::Pin => TrayAction::SetPin(!crate::pin::enrolled()),
+            crate::options::WindowsOption::ChangePin => TrayAction::ChangePin,
+            crate::options::WindowsOption::ChangePassword => TrayAction::ChangePassword,
+            crate::options::WindowsOption::SignOut => TrayAction::SignOut,
+            crate::options::WindowsOption::DeleteAccount => TrayAction::DeleteAccount,
+            crate::options::WindowsOption::Quit => TrayAction::Quit,
+        };
+        self.on_tray(ctx, action);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn option_row(ui: &mut egui::Ui, label: &str, checked: bool) -> bool {
+    let colors = colors(ui);
+    let text = if checked { format!("✓  {label}") } else { format!("    {label}") };
+    let clicked = ui
+        .add(Button::new(RichText::new(text).color(colors.ink)).min_size(Vec2::new(220.0, 0.0)))
+        .clicked();
+    if clicked {
+        ui.close_menu();
+    }
+    clicked
+}
+
 fn wordmark(ui: &mut egui::Ui) {
     let colors = colors(ui);
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), 16.0, colors.green);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "D",
-            egui::FontId::proportional(18.0),
-            colors.on_green,
-        );
-        ui.vertical(|ui| {
-            ui.label(RichText::new("Drop").size(22.0).strong().color(colors.ink));
-            ui.label(RichText::new("Private clipboard").size(11.0).color(colors.muted));
-        });
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 16.0, colors.green);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "D",
+        egui::FontId::proportional(18.0),
+        colors.on_green,
+    );
+    ui.vertical(|ui| {
+        ui.label(RichText::new("Drop").size(22.0).strong().color(colors.ink));
+        ui.label(RichText::new("Private clipboard").size(11.0).color(colors.muted));
     });
 }
 
