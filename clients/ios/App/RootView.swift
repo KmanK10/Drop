@@ -412,6 +412,8 @@ private struct LineField: UIViewRepresentable {
         field.adjustsFontForContentSizeCategory = true
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.setContentHuggingPriority(.required, for: .vertical)
+        field.setContentCompressionResistancePriority(.required, for: .vertical)
         apply(field)
         field.text = text
         return field
@@ -666,6 +668,7 @@ private struct SettingsView: View {
                     .foregroundStyle(palette.danger)
                 if confirmingDelete {
                     field("Username", text: $deleteName, secure: false)
+                        .fixedSize(horizontal: false, vertical: true)
                     if !model.settingsError.isEmpty {
                         Text(model.settingsError).font(.subheadline).foregroundStyle(palette.danger)
                     }
