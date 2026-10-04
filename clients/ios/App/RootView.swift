@@ -1,5 +1,7 @@
 import DropKit
+import PhotosUI
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct RootView: View {
@@ -94,9 +96,19 @@ private struct SignInView: View {
     }
 }
 
+private enum AddChoice {
+    case camera
+    case photo
+    case file
+}
+
 private struct ClipboardView: View {
     @EnvironmentObject private var model: SessionModel
     @Environment(\.colorScheme) private var colorScheme
+    @State private var offeringAdd = false
+    @State private var takingPhoto = false
+    @State private var choosingPhoto = false
+    @State private var pickingFile = false
 
     private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
 
@@ -131,8 +143,16 @@ private struct ClipboardView: View {
                     .disabled(model.busy)
                 Button("Paste") { model.paste() }
                     .disabled(model.busy)
-                Button("Upload file…") { model.pickingFile = true }
-                    .disabled(model.busy)
+                Button {
+                    offeringAdd = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 44, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("Add")
+                .disabled(model.busy)
             }
             .foregroundStyle(palette.ink)
             Notice()
@@ -152,7 +172,32 @@ private struct ClipboardView: View {
                 .font(.caption)
                 .foregroundStyle(palette.muted)
         }
-        .fileImporter(isPresented: $model.pickingFile, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+        .confirmationDialog("Add", isPresented: $offeringAdd, titleVisibility: .hidden) {
+            Button("Take a photo") { presentAdd(.camera) }
+            Button("Choose a photo") { presentAdd(.photo) }
+            Button("Choose a file") { presentAdd(.file) }
+        }
+        .fullScreenCover(isPresented: $takingPhoto) {
+            CameraPicker(
+                isPresented: $takingPhoto,
+                onCapture: { name, data in
+                    model.uploadFiles([(name: name, data: data)])
+                },
+                onFailure: {
+                    model.error = "Couldn't read that photo."
+                }
+            )
+        }
+        .sheet(isPresented: $choosingPhoto) {
+            PhotoLibraryPicker(isPresented: $choosingPhoto) { files, unread in
+                if files.isEmpty && unread == 0 {
+                    model.error = "Couldn't read that photo."
+                } else {
+                    model.uploadFiles(files, unread: unread)
+                }
+            }
+        }
+        .fileImporter(isPresented: $pickingFile, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result {
                 model.uploadPicked(urls)
             }
@@ -163,6 +208,25 @@ private struct ClipboardView: View {
         )) {
             if let url = model.shareURL {
                 ActivityView(url: url) { model.finishShare() }
+            }
+        }
+    }
+
+    /// The action sheet has to finish dismissing before the camera, photo
+    /// library, or file picker can be presented.
+    private func presentAdd(_ choice: AddChoice) {
+        DispatchQueue.main.async {
+            switch choice {
+            case .camera:
+                if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                    takingPhoto = true
+                } else {
+                    model.error = "This device has no camera."
+                }
+            case .photo:
+                choosingPhoto = true
+            case .file:
+                pickingFile = true
             }
         }
     }
@@ -371,6 +435,142 @@ private struct ActivityView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+private struct CameraPicker: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
+    var onCapture: (String, Data) -> Void
+    var onFailure: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.mediaTypes = [UTType.image.identifier]
+        picker.cameraCaptureMode = .photo
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ picker: UIImagePickerController, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        var parent: CameraPicker
+
+        init(parent: CameraPicker) {
+            self.parent = parent
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.isPresented = false
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            parent.isPresented = false
+            guard let image = info[.originalImage] as? UIImage, let data = image.jpegData(compressionQuality: 0.92) else {
+                parent.onFailure()
+                return
+            }
+            parent.onCapture(Self.photoName(), data)
+        }
+
+        private static func photoName() -> String {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyyMMdd-HHmmss"
+            return "photo-\(formatter.string(from: Date())).jpg"
+        }
+    }
+}
+
+private final class PhotoSlots {
+    private var values: [(name: String, data: Data)?]
+    private let lock = NSLock()
+
+    init(count: Int) {
+        values = Array(repeating: nil, count: count)
+    }
+
+    func put(_ index: Int, name: String, data: Data) {
+        lock.lock()
+        values[index] = (name: name, data: data)
+        lock.unlock()
+    }
+
+    func files() -> [(name: String, data: Data)] {
+        lock.lock()
+        let ready = values.compactMap { $0 }
+        lock.unlock()
+        return ready
+    }
+}
+
+private struct PhotoLibraryPicker: UIViewControllerRepresentable {
+    @Binding var isPresented: Bool
+    var onPick: ([(name: String, data: Data)], Int) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 0
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ picker: PHPickerViewController, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        var parent: PhotoLibraryPicker
+
+        init(parent: PhotoLibraryPicker) {
+            self.parent = parent
+        }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            parent.isPresented = false
+            guard !results.isEmpty else { return }
+            let onPick = parent.onPick
+            let slots = PhotoSlots(count: results.count)
+            let group = DispatchGroup()
+            for (index, result) in results.enumerated() {
+                let provider = result.itemProvider
+                let identifier = provider.registeredTypeIdentifiers.first { UTType($0)?.conforms(to: .image) == true }
+                    ?? UTType.image.identifier
+                group.enter()
+                provider.loadFileRepresentation(forTypeIdentifier: identifier) { url, _ in
+                    if let url, let data = try? Data(contentsOf: url) {
+                        var name = url.lastPathComponent
+                        if name.isEmpty { name = "photo" }
+                        if (name as NSString).pathExtension.isEmpty {
+                            let ext = UTType(identifier)?.preferredFilenameExtension ?? "jpg"
+                            name += ".\(ext)"
+                        }
+                        slots.put(index, name: name, data: data)
+                    }
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main) {
+                let files = slots.files()
+                onPick(files, results.count - files.count)
+            }
+        }
+    }
 }
 
 /// Light matches the current cream screen. Dark matches the website's dark palette.

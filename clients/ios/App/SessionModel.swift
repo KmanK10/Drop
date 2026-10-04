@@ -15,7 +15,6 @@ final class SessionModel: ObservableObject {
     @Published var status = ""
     @Published var busy = false
     @Published var http = false
-    @Published var pickingFile = false
     @Published var shareURL: URL?
     @Published var pendingDelete: String?
 
@@ -112,16 +111,15 @@ final class SessionModel: ObservableObject {
     }
 
     func uploadPicked(_ urls: [URL]) {
-        guard let client else {
+        guard client != nil else {
             error = DropError.locked.text
             return
         }
         busy = true
         error = ""
         work.async { [weak self] in
-            var last: DropSnapshot?
+            var files: [(name: String, data: Data)] = []
             var failures: [String] = []
-            var uploaded = 0
             for url in urls {
                 let accessed = url.startAccessingSecurityScopedResource()
                 defer {
@@ -137,25 +135,29 @@ final class SessionModel: ObservableObject {
                     failures.append("Couldn't read \(name).")
                     continue
                 }
-                do {
-                    last = try client.uploadFile(name: name, mime: mimeForFilename(name), bytes: Array(data))
-                    uploaded += 1
-                } catch {
-                    failures.append((error as? DropError)?.text ?? error.localizedDescription)
-                }
+                files.append((name: name, data: data))
             }
-            DispatchQueue.main.async {
-                if let last {
-                    let message = uploaded == 1 ? "Uploaded 1 file." : "Uploaded \(uploaded) files."
-                    self?.show(last, status: failures.isEmpty ? message : "Uploaded \(uploaded).")
-                } else {
-                    self?.busy = false
-                }
-                if !failures.isEmpty {
-                    self?.error = failures.joined(separator: " ")
-                    self?.status = ""
-                }
-            }
+            self?.deliver(files, failures: failures)
+        }
+    }
+
+    /// Camera photos and library photos use the same upload as a picked file.
+    func uploadFiles(_ files: [(name: String, data: Data)], unread: Int = 0) {
+        guard client != nil else {
+            error = DropError.locked.text
+            return
+        }
+        if files.isEmpty && unread == 0 { return }
+        var failures: [String] = []
+        if unread == 1 {
+            failures.append("Couldn't read 1 photo.")
+        } else if unread > 1 {
+            failures.append("Couldn't read \(unread) photos.")
+        }
+        busy = true
+        error = ""
+        work.async { [weak self] in
+            self?.deliver(files, failures: failures)
         }
     }
 
@@ -270,6 +272,40 @@ final class SessionModel: ObservableObject {
                 if !failures.isEmpty {
                     self?.error = failures.joined(separator: " ")
                 }
+            }
+        }
+    }
+
+    private func deliver(_ files: [(name: String, data: Data)], failures: [String]) {
+        guard let client else {
+            DispatchQueue.main.async { [weak self] in
+                self?.busy = false
+                self?.error = DropError.locked.text
+            }
+            return
+        }
+        var failures = failures
+        var last: DropSnapshot?
+        var uploaded = 0
+        for file in files {
+            let name = file.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "file" : file.name
+            do {
+                last = try client.uploadFile(name: name, mime: mimeForFilename(name), bytes: Array(file.data))
+                uploaded += 1
+            } catch {
+                failures.append((error as? DropError)?.text ?? error.localizedDescription)
+            }
+        }
+        DispatchQueue.main.async { [weak self] in
+            if let last {
+                let message = uploaded == 1 ? "Uploaded 1 file." : "Uploaded \(uploaded) files."
+                self?.show(last, status: failures.isEmpty ? message : "Uploaded \(uploaded).")
+            } else {
+                self?.busy = false
+            }
+            if !failures.isEmpty {
+                self?.error = failures.joined(separator: " ")
+                self?.status = ""
             }
         }
     }

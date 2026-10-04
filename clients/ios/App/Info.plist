@@ -22,6 +22,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo to add it to your Drop clipboard.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
