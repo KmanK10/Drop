@@ -149,43 +149,47 @@ private struct ClipboardView: View {
                     .font(.footnote)
                     .foregroundStyle(palette.muted)
             }
-            ClipboardEditor(text: $model.draft, ink: UIColor(palette.ink), caret: UIColor(palette.green))
-                .frame(minHeight: 96)
-                .padding(8)
-                .background(palette.card)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.line))
-            HStack {
-                Button("Save text") { model.saveDraft() }
-                    .buttonStyle(PrimaryButtonStyle())
-                    .disabled(model.busy)
-                Button("Paste") { model.paste() }
-                    .disabled(model.busy)
-                Menu {
-                    Button("Take a photo") { presentAdd(.camera) }
-                    Button("Choose a photo") { presentAdd(.photo) }
-                    Button("Choose a file") { presentAdd(.file) }
-                } label: {
-                    CircleMark(systemName: "plus", ink: palette.ink, label: "Add")
-                }
-                .menuOrder(.fixed)
-                .buttonStyle(.plain)
-                .fixedSize()
-                .disabled(model.busy)
-            }
-            .foregroundStyle(palette.ink)
-            Notice()
             ScrollView {
-                if model.items.isEmpty {
-                    Text("Nothing here yet. Share a file into Drop, or save a note.")
-                        .font(.subheadline)
-                        .foregroundStyle(palette.muted)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 12) {
+                    ClipboardEditor(text: $model.draft, ink: UIColor(palette.ink), caret: UIColor(palette.green))
+                        .frame(minHeight: 96)
+                        .padding(8)
+                        .background(palette.card)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.line))
+                    HStack {
+                        Button("Save text") { model.saveDraft() }
+                            .buttonStyle(PrimaryButtonStyle())
+                            .disabled(model.busy)
+                        Button("Paste") { model.paste() }
+                            .disabled(model.busy)
+                        Menu {
+                            Button("Take a photo") { presentAdd(.camera) }
+                            Button("Choose a photo") { presentAdd(.photo) }
+                            Button("Choose a file") { presentAdd(.file) }
+                        } label: {
+                            CircleMark(systemName: "plus", ink: palette.ink, label: "Add")
+                        }
+                        .menuOrder(.fixed)
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                        .disabled(model.busy)
+                    }
+                    .foregroundStyle(palette.ink)
+                    Notice()
+                    if model.items.isEmpty {
+                        Text("Nothing here yet. Share a file into Drop, or save a note.")
+                            .font(.subheadline)
+                            .foregroundStyle(palette.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    ForEach(model.items) { item in
+                        ItemCard(item: item)
+                    }
                 }
-                ForEach(model.items) { item in
-                    ItemCard(item: item)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .scrollDismissesKeyboard(.interactively)
             if model.biometryAvailable {
                 Toggle(model.biometryLabel, isOn: Binding(
@@ -194,9 +198,6 @@ private struct ClipboardView: View {
                 ))
                 .disabled(model.busy)
                 .foregroundStyle(palette.ink)
-                Text("The password stays on this phone, and \(model.biometryName) can unlock next time.")
-                    .font(.caption)
-                    .foregroundStyle(palette.muted)
             }
         }
         .fullScreenCover(isPresented: $takingPhoto) {
@@ -388,8 +389,25 @@ private struct ItemCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(item.title).font(.body.weight(.semibold)).foregroundStyle(palette.ink)
+            Text(item.title)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(palette.ink)
+                .lineLimit(item.kind == "text" ? 4 : nil)
             Text(item.detail).font(.footnote).foregroundStyle(palette.muted)
+            if let preview = item.previewText, !preview.isEmpty {
+                Text(preview)
+                    .font(.subheadline)
+                    .foregroundStyle(palette.ink)
+                    .lineLimit(4)
+            }
+            if let preview = item.previewImage, let image = UIImage(data: preview) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 160, maxHeight: 120, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .accessibilityLabel(item.title)
+            }
             HStack(spacing: 8) {
                 if item.canCopy {
                     Button("Copy") { model.copy(item) }

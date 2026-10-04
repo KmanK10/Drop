@@ -17,6 +17,10 @@ public struct DropItem: Equatable, Sendable, Identifiable {
     public var detail: String
     public var canCopy: Bool
     public var broken: Bool
+    /// A short plain-text snippet for a text file. Notes use `title` for that snippet.
+    public var previewText: String?
+    /// A small JPEG made in memory from a decrypted photo. Not written to a file.
+    public var previewImage: Data?
 }
 
 public struct DropSnapshot: Sendable {
@@ -425,7 +429,9 @@ public final class DropClient: @unchecked Sendable {
             title: summary.title,
             detail: summary.detail,
             canCopy: summary.canCopy,
-            broken: false
+            broken: false,
+            previewText: summary.previewText,
+            previewImage: summary.previewImage
         ), text: summary.text)
     }
 
@@ -609,15 +615,53 @@ private func accountFrom(_ me: [String: Any], ttl: UInt64) -> DropAccount {
     )
 }
 
-private func summarize(_ plain: ItemPlain, size: UInt64) -> (title: String, detail: String, canCopy: Bool, text: String?) {
+private struct SummaryFace {
+    var title: String
+    var detail: String
+    var canCopy: Bool
+    var text: String?
+    var previewText: String?
+    var previewImage: Data?
+}
+
+private func summarize(_ plain: ItemPlain, size: UInt64) -> SummaryFace {
     switch plain.kind {
     case .text:
         let text = String(decoding: plain.body, as: UTF8.self)
-        let preview = DropFormat.preview(text, limit: 80)
-        return (preview.isEmpty ? "Empty note" : preview, "Text · \(DropFormat.bytes(UInt64(text.utf8.count)))", true, text)
+        let preview = ItemPreview.textSnippet(plain.body)
+        return SummaryFace(
+            title: preview.isEmpty ? "Empty note" : preview,
+            detail: "Text · \(DropFormat.bytes(UInt64(text.utf8.count)))",
+            canCopy: true,
+            text: text,
+            previewText: nil,
+            previewImage: nil
+        )
     case .file:
         let title = plain.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled file" : plain.name
-        return (title, DropFormat.bytes(size), ClipboardKinds.fileKind(plain.mime) != nil, nil)
+        let fileKind = ClipboardKinds.fileKind(plain.mime)
+        let previewText: String?
+        let previewImage: Data?
+        switch fileKind {
+        case .text, .html:
+            let snippet = ItemPreview.textSnippet(plain.body)
+            previewText = snippet.isEmpty ? nil : snippet
+            previewImage = nil
+        case .image:
+            previewText = nil
+            previewImage = ItemPreview.thumbnailJPEG(plain.body)
+        case nil:
+            previewText = nil
+            previewImage = nil
+        }
+        return SummaryFace(
+            title: title,
+            detail: DropFormat.bytes(size),
+            canCopy: fileKind != nil,
+            text: nil,
+            previewText: previewText,
+            previewImage: previewImage
+        )
     }
 }
 
@@ -631,7 +675,9 @@ private func broken(id: String, createdAt: Int64, size: UInt64) -> MemoryItem {
             title: "Can't decrypt this item",
             detail: DropFormat.bytes(size),
             canCopy: false,
-            broken: true
+            broken: true,
+            previewText: nil,
+            previewImage: nil
         ),
         text: nil
     )

@@ -21,7 +21,6 @@ final class SessionModel: ObservableObject {
     @Published var biometricsOn = false
     @Published var biometryAvailable = false
     @Published var biometryLabel = "Unlock with Face ID"
-    @Published var biometryName = "Face ID"
 
     private var triedBiometrics = false
     private var biometricTicket = 0
@@ -38,7 +37,6 @@ final class SessionModel: ObservableObject {
         let kind = BiometricStore.kind()
         biometryAvailable = kind != .none
         biometryLabel = kind.label
-        biometryName = kind.name
         biometricsOn = BiometricStore.enrolled()
     }
 

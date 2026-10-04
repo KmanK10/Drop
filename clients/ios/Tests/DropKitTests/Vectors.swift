@@ -83,6 +83,17 @@ final class Vectors: XCTestCase {
         try FileManager.default.removeItem(at: dir)
     }
 
+    func testTextSnippetStaysShortAndDropsTags() {
+        XCTAssertEqual(ItemPreview.textSnippet(Array("hi".utf8)), "hi")
+        let html = Array("<p>hello</p>".utf8)
+        XCTAssertEqual(ItemPreview.textSnippet(html), "hello")
+        let huge = Array(String(repeating: "hello ", count: 5000).utf8)
+        let snippet = ItemPreview.textSnippet(huge, limit: 160)
+        XCTAssertLessThanOrEqual(snippet.count, 161)
+        XCTAssertTrue(snippet.hasSuffix("…"))
+        XCTAssertLessThan(snippet.count, huge.count)
+    }
+
     func testUnlockBlobRoundTripsWithoutThePassword() throws {
         let key = [UInt8](repeating: 7, count: 32)
         let blob = UnlockBlob(contentKey: key, server: "https://drop.example", username: "ada", cookie: "session-token")
