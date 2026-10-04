@@ -21,6 +21,10 @@ final class SessionModel: ObservableObject {
     @Published var biometricsOn = false
     @Published var biometryAvailable = false
     @Published var biometryLabel = "Unlock with Face ID"
+    @Published var settingsError = ""
+    @Published var settingsStatus = ""
+    @Published var settingsBusy = ""
+    @Published var passwordChangeDone = 0
 
     private var triedBiometrics = false
     private var biometricTicket = 0
@@ -78,6 +82,9 @@ final class SessionModel: ObservableObject {
         biometricTicket += 1
         BiometricStore.delete()
         biometricsOn = false
+        settingsError = ""
+        settingsStatus = ""
+        settingsBusy = ""
         busy = true
         refreshTimer?.invalidate()
         refreshTimer = nil
@@ -299,6 +306,56 @@ final class SessionModel: ObservableObject {
         }
     }
 
+    func changePassword(current: String, next: String, confirm: String) {
+        settingsError = ""
+        settingsStatus = ""
+        if current.isEmpty {
+            settingsError = "Enter your current password."
+            return
+        }
+        if let problem = DropPassword.rejection(next, confirm: confirm) {
+            settingsError = problem
+            return
+        }
+        guard let client else {
+            settingsError = DropError.locked.text
+            return
+        }
+        busy = true
+        settingsBusy = "Checking the current password…"
+        work.async { [weak self] in
+            do {
+                let snapshot = try client.changePassword(current: current, next: next) { message in
+                    DispatchQueue.main.async { self?.settingsBusy = message }
+                }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.show(snapshot, status: "")
+                    self.settingsBusy = ""
+                    self.settingsError = ""
+                    self.settingsStatus = "Password changed. Other signed-in devices need the new password."
+                    self.passwordChangeDone += 1
+                    if self.biometricsOn {
+                        self.refreshStoredUnlock(ticket: self.biometricTicket, dropStaleOnFailure: true)
+                    }
+                }
+            } catch {
+                let signedOut = (error as? DropError) == .signedOut
+                if signedOut {
+                    self?.fail(DropError.signedOut)
+                    DispatchQueue.main.async { self?.settingsBusy = "" }
+                    return
+                }
+                let text = (error as? DropError)?.text ?? error.localizedDescription
+                DispatchQueue.main.async {
+                    self?.settingsError = text
+                    self?.settingsBusy = ""
+                    self?.busy = false
+                }
+            }
+        }
+    }
+
     func setBiometrics(_ enabled: Bool) {
         biometricTicket += 1
         if !enabled {
@@ -413,7 +470,7 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    private func refreshStoredUnlock(ticket: Int) {
+    private func refreshStoredUnlock(ticket: Int, dropStaleOnFailure: Bool = false) {
         guard let client else {
             biometricsOn = BiometricStore.enrolled()
             return
@@ -443,10 +500,21 @@ final class SessionModel: ObservableObject {
                     self.biometricsOn = true
                     self.status = ""
                 case .canceled:
-                    self.biometricsOn = BiometricStore.enrolled()
+                    if dropStaleOnFailure {
+                        BiometricStore.delete()
+                        self.biometricsOn = false
+                    } else {
+                        self.biometricsOn = BiometricStore.enrolled()
+                    }
                 case .failed(let message):
-                    self.biometricsOn = BiometricStore.enrolled()
-                    self.error = message
+                    if dropStaleOnFailure {
+                        BiometricStore.delete()
+                        self.biometricsOn = false
+                        self.settingsError = message
+                    } else {
+                        self.biometricsOn = BiometricStore.enrolled()
+                        self.error = message
+                    }
                 }
             }
         }

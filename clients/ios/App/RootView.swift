@@ -127,6 +127,7 @@ private struct ClipboardView: View {
     @State private var takingPhoto = false
     @State private var choosingPhoto = false
     @State private var pickingFile = false
+    @State private var showSettings = false
 
     private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
 
@@ -135,9 +136,17 @@ private struct ClipboardView: View {
             HStack {
                 Wordmark()
                 Spacer()
-                Button("Sign out") { model.signOut() }
-                    .disabled(model.busy)
-                    .foregroundStyle(palette.ink)
+                Menu {
+                    Button("Sign out") { model.signOut() }
+                        .disabled(model.busy)
+                    Button("Settings") {
+                        DispatchQueue.main.async { showSettings = true }
+                    }
+                } label: {
+                    Text("Menu")
+                }
+                .menuOrder(.fixed)
+                .foregroundStyle(palette.ink)
             }
             if let account = model.account {
                 Text("\(account.username) · \(DropFormat.bytes(account.usedBytes)) of \(DropFormat.bytes(account.quotaBytes)) · kept \(DropFormat.retention(account.ttlMs))")
@@ -191,14 +200,10 @@ private struct ClipboardView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .scrollDismissesKeyboard(.interactively)
-            if model.biometryAvailable {
-                Toggle(model.biometryLabel, isOn: Binding(
-                    get: { model.biometricsOn },
-                    set: { model.setBiometrics($0) }
-                ))
-                .disabled(model.busy)
-                .foregroundStyle(palette.ink)
-            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .navigationDestination(isPresented: $showSettings) {
+            SettingsView()
         }
         .fullScreenCover(isPresented: $takingPhoto) {
             CameraPicker(
@@ -279,6 +284,7 @@ private struct LineField: UIViewRepresentable {
     var muted: UIColor
     var caret: UIColor
     var keyboard: UIKeyboardType
+    var enabled = true
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
@@ -295,6 +301,7 @@ private struct LineField: UIViewRepresentable {
         field.autocapitalizationType = .none
         field.autocorrectionType = .no
         field.textContentType = .none
+        field.isEnabled = enabled
         field.font = .preferredFont(forTextStyle: .body)
         field.adjustsFontForContentSizeCategory = true
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -315,6 +322,7 @@ private struct LineField: UIViewRepresentable {
     private func apply(_ field: UITextField) {
         field.textColor = ink
         field.tintColor = caret
+        field.isEnabled = enabled
         field.attributedPlaceholder = NSAttributedString(
             string: placeholder,
             attributes: [.foregroundColor: muted]
@@ -444,6 +452,87 @@ private struct ItemCard: View {
         .background(palette.card)
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.line))
+    }
+}
+
+private struct SettingsView: View {
+    @EnvironmentObject private var model: SessionModel
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var current = ""
+    @State private var next = ""
+    @State private var confirm = ""
+
+    private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if model.biometryAvailable {
+                    Toggle(model.biometryLabel, isOn: Binding(
+                        get: { model.biometricsOn },
+                        set: { model.setBiometrics($0) }
+                    ))
+                    .disabled(model.busy)
+                    .foregroundStyle(palette.ink)
+                }
+                Text("Password")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(palette.ink)
+                field("Current password", text: $current)
+                field("New password", text: $next)
+                field("Confirm new password", text: $confirm)
+                if !model.settingsError.isEmpty {
+                    Text(model.settingsError).font(.subheadline).foregroundStyle(palette.danger)
+                }
+                if !model.settingsStatus.isEmpty {
+                    Text(model.settingsStatus).font(.subheadline).foregroundStyle(palette.muted)
+                }
+                Button {
+                    model.changePassword(current: current, next: next, confirm: confirm)
+                } label: {
+                    Text(model.settingsBusy.isEmpty ? "Change password" : model.settingsBusy)
+                        .multilineTextAlignment(.center)
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .disabled(model.busy)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(palette.background.ignoresSafeArea())
+        .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbarBackground(palette.background, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(colorScheme == .dark ? .dark : .light, for: .navigationBar)
+        .onChange(of: model.passwordChangeDone) { _, _ in
+            current = ""
+            next = ""
+            confirm = ""
+        }
+    }
+
+    private func field(_ title: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).foregroundStyle(palette.ink)
+            LineField(
+                text: text,
+                placeholder: title,
+                secure: true,
+                ink: UIColor(palette.ink),
+                muted: UIColor(palette.muted),
+                caret: UIColor(palette.green),
+                keyboard: .default,
+                enabled: !model.busy
+            )
+            .padding(12)
+            .background(palette.card)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(palette.line))
+        }
     }
 }
 

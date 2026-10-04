@@ -15,6 +15,38 @@ final class Vectors: XCTestCase {
         XCTAssertNotEqual(derived.authVerifier, derived.contentKey)
     }
 
+    func testPasswordRulesMatchTheBrowser() {
+        XCTAssertEqual(DropCrypto.passwordError("short", confirm: "short"), "Use at least 10 characters.")
+        let tooLong = String(repeating: "a", count: 201)
+        XCTAssertEqual(DropCrypto.passwordError(tooLong, confirm: tooLong), "That password is too long.")
+        XCTAssertEqual(
+            DropCrypto.passwordError("long-enough-password", confirm: "different-password"),
+            "Those passwords don't match."
+        )
+        XCTAssertNil(DropCrypto.passwordError("long-enough-password", confirm: "long-enough-password"))
+        XCTAssertNil(DropCrypto.passwordError("password\u{FF11}ok", confirm: "password1ok"))
+        XCTAssertEqual(DropPassword.rejection("short", confirm: "short"), "Use at least 10 characters.")
+    }
+
+    func testRegistrationFieldsOmitTheContentKey() throws {
+        let salt = [UInt8](repeating: 1, count: 16)
+        let verifier = [UInt8](repeating: 2, count: 32)
+        let contentKey = [UInt8](repeating: 3, count: 32)
+        let keyCheck = [UInt8](repeating: 4, count: 40)
+        let fields = DropCrypto.registrationFields(salt: salt, authVerifier: verifier, keyCheck: keyCheck)
+        XCTAssertEqual((fields["kdfMemory"] as? NSNumber)?.intValue, 19_456)
+        XCTAssertEqual((fields["kdfTime"] as? NSNumber)?.intValue, 2)
+        XCTAssertEqual((fields["kdfParallelism"] as? NSNumber)?.intValue, 1)
+        XCTAssertEqual(fields["authVerifier"] as? String, Bytes.b64url(verifier))
+        XCTAssertEqual(fields["kdfSalt"] as? String, Bytes.b64url(salt))
+        XCTAssertEqual(fields["keyCheck"] as? String, Bytes.b64url(keyCheck))
+        XCTAssertNil(fields["password"])
+        XCTAssertNil(fields["contentKey"])
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: fields), as: UTF8.self)
+        XCTAssertFalse(encoded.contains(Bytes.b64url(contentKey)))
+        XCTAssertFalse(encoded.contains("password"))
+    }
+
     func testPasswordsAreNormalized() throws {
         let salt = [UInt8](repeating: 0x22, count: 16)
         let latin = try DropCrypto.deriveKeys(password: "password1", salt: salt, params: currentParams())

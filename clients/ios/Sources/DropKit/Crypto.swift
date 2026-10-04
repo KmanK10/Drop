@@ -34,6 +34,57 @@ enum DropCrypto {
         password.precomposedStringWithCompatibilityMapping
     }
 
+    /// Same rules as the website. The confirmation is compared after NFKC.
+    static func passwordError(_ password: String, confirm: String? = nil) -> String? {
+        let normalized = normalizePassword(password)
+        if normalized.count < 10 { return "Use at least 10 characters." }
+        if normalized.count > 200 { return "That password is too long." }
+        if let confirm, normalizePassword(confirm) != normalized {
+            return "Those passwords don't match."
+        }
+        return nil
+    }
+
+    struct AccountMaterial {
+        var salt: [UInt8]
+        var authVerifier: [UInt8]
+        var contentKey: [UInt8]
+        var keyCheck: [UInt8]
+    }
+
+    /// A fresh salt, verifier, content key, and key check. Nothing here is written to a file.
+    static func accountMaterial(password: String) throws -> AccountMaterial {
+        if let problem = passwordError(password) { throw DropError.message(problem) }
+        var salt = [UInt8](repeating: 0, count: 16)
+        let status = SecRandomCopyBytes(kSecRandomDefault, salt.count, &salt)
+        guard status == errSecSuccess else { throw DropError.message("Couldn't start the password change.") }
+        let params = Params(algo: "argon2id", memory: memory, time: time, parallelism: parallelism)
+        var derived = try deriveKeys(password: password, salt: salt, params: params)
+        defer {
+            Bytes.wipe(&derived.authVerifier)
+            Bytes.wipe(&derived.contentKey)
+        }
+        let keyCheck = try encrypt(key: derived.contentKey, plaintext: Array(keyCheckText.utf8))
+        return AccountMaterial(
+            salt: salt,
+            authVerifier: Array(derived.authVerifier),
+            contentKey: Array(derived.contentKey),
+            keyCheck: keyCheck
+        )
+    }
+
+    /// Fields the server accepts for a new password. The content key is not one of them.
+    static func registrationFields(salt: [UInt8], authVerifier: [UInt8], keyCheck: [UInt8]) -> [String: Any] {
+        [
+            "authVerifier": Bytes.b64url(authVerifier),
+            "kdfSalt": Bytes.b64url(salt),
+            "kdfMemory": NSNumber(value: memory),
+            "kdfTime": NSNumber(value: time),
+            "kdfParallelism": NSNumber(value: parallelism),
+            "keyCheck": Bytes.b64url(keyCheck),
+        ]
+    }
+
     static func assertStrong(_ params: Params) throws {
         guard params.algo == "argon2id" else { throw DropError.badKdf }
         guard params.memory >= memory, params.time >= time, params.parallelism >= 1,
@@ -125,6 +176,13 @@ enum DropCrypto {
         try assertStrong(params)
         guard salt.count >= 16 else { throw DropError.badKdf }
         return (params, salt)
+    }
+}
+
+/// Password rules shared with the website. The app uses this before calling the account API.
+public enum DropPassword {
+    public static func rejection(_ password: String, confirm: String?) -> String? {
+        DropCrypto.passwordError(password, confirm: confirm)
     }
 }
 

@@ -136,6 +136,101 @@ public final class DropClient: @unchecked Sendable {
         clearCookies()
     }
 
+    /// Re-encrypts every item with a new content key, then commits that key's
+    /// registration. The password is not sent. A failed attempt deletes the rekey
+    /// and leaves the current key in place.
+    public func changePassword(current: String, next: String, progress: @escaping (String) -> Void = { _ in }) throws -> DropSnapshot {
+        if current.isEmpty { throw DropError.message("Enter your current password.") }
+        if let problem = DropCrypto.passwordError(next) { throw DropError.message(problem) }
+        var oldKey = try ensureUnlocked()
+        defer { Bytes.wipe(&oldKey) }
+        progress("Checking the current password…")
+        let me = try getJSON("/api/me")
+        guard let kdf = me["kdf"] as? [String: Any] else { throw DropError.keyCheck }
+        let (params, salt) = try DropCrypto.parseKdf(kdf)
+        var derived = try DropCrypto.deriveKeys(password: current, salt: salt, params: params)
+        defer {
+            Bytes.wipe(&derived.authVerifier)
+            Bytes.wipe(&derived.contentKey)
+        }
+        guard let checkText = me["keyCheck"] as? String,
+              let check = Bytes.fromB64url(checkText),
+              DropCrypto.verifyKeyCheck(contentKey: derived.contentKey, blob: check),
+              Bytes.timingEqual(derived.contentKey, oldKey)
+        else {
+            throw DropError.message("The current password is wrong.")
+        }
+        var material = try DropCrypto.accountMaterial(password: next)
+        defer {
+            Bytes.wipe(&material.salt)
+            Bytes.wipe(&material.authVerifier)
+            Bytes.wipe(&material.contentKey)
+            Bytes.wipe(&material.keyCheck)
+        }
+        let started = try postPasswordJSON(
+            "/api/account/password/start",
+            ["currentAuthVerifier": Bytes.b64url(derived.authVerifier)]
+        )
+        Bytes.wipe(&derived.authVerifier)
+        guard let rekeyId = started["rekeyId"] as? String, validID(rekeyId) else {
+            throw DropError.server("Start the password change again.")
+        }
+        var committed = false
+        defer {
+            if !committed {
+                abortRekey(rekeyId)
+            }
+        }
+        guard let rows = started["items"] as? [[String: Any]] else {
+            throw DropError.server("Start the password change again.")
+        }
+        var ids: [String] = []
+        ids.reserveCapacity(rows.count)
+        for row in rows {
+            guard let id = row["id"] as? String, validID(id) else {
+                throw DropError.server("Start the password change again.")
+            }
+            ids.append(id)
+        }
+        var newKey = Array(material.contentKey)
+        defer { Bytes.wipe(&newKey) }
+        for (index, id) in ids.enumerated() {
+            progress("Re-encrypting \(index + 1) of \(ids.count)…")
+            let (status, bytes) = try request(method: "GET", path: "/api/items/\(id)", body: nil, contentType: nil)
+            if status == 401 { throw DropError.signedOut }
+            guard (200..<300).contains(status) else { throw errorFrom(status, bytes) }
+            var plain = try DropCrypto.decrypt(key: oldKey, blob: Array(bytes))
+            let ciphertext: [UInt8]
+            do {
+                ciphertext = try DropCrypto.encrypt(key: newKey, plaintext: plain)
+            } catch {
+                Bytes.wipe(&plain)
+                throw error
+            }
+            Bytes.wipe(&plain)
+            let (putStatus, putBody) = try request(
+                method: "PUT",
+                path: "/api/account/password/items/\(id)",
+                body: Data(ciphertext),
+                contentType: "application/octet-stream",
+                extraHeaders: ["x-drop-rekey": rekeyId]
+            )
+            if putStatus == 401 { throw DropError.signedOut }
+            guard (200..<300).contains(putStatus) else { throw errorFrom(putStatus, putBody) }
+        }
+        progress("Saving the new password…")
+        var fields = DropCrypto.registrationFields(
+            salt: material.salt,
+            authVerifier: material.authVerifier,
+            keyCheck: material.keyCheck
+        )
+        fields["rekeyId"] = rekeyId
+        let updated = try postPasswordJSON("/api/account/password/commit", fields)
+        committed = true
+        installContentKey(newKey, me: updated)
+        return try refresh()
+    }
+
     /// Content key and session cookie for the keychain. The password is not included.
     public func exportUnlock() throws -> Data {
         lock.lock()
@@ -508,12 +603,59 @@ public final class DropClient: @unchecked Sendable {
         return try interpret(status, response, session: expected)
     }
 
+    /// Password start can answer 401 for a wrong verifier while the session is still valid.
+    private func postPasswordJSON(_ path: String, _ body: [String: Any]) throws -> [String: Any] {
+        let data = try JSONSerialization.data(withJSONObject: body)
+        let (status, response) = try request(method: "POST", path: path, body: data, contentType: "application/json")
+        if status == 401 { throw passwordOrSignedOut(response) }
+        guard (200..<300).contains(status) else { throw errorFrom(status, response) }
+        guard let object = try? JSONSerialization.jsonObject(with: response) as? [String: Any] else {
+            throw DropError.message("Something went wrong.")
+        }
+        return object
+    }
+
+    private func passwordOrSignedOut(_ bytes: Data) -> DropError {
+        guard let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+              let message = object["error"] as? String,
+              !message.isEmpty, message.count < 400, !message.contains("\n"), !message.contains("\r")
+        else {
+            return .signedOut
+        }
+        if message == "Sign in again." { return .signedOut }
+        return .server(message)
+    }
+
+    private func abortRekey(_ rekeyId: String) {
+        guard validID(rekeyId) else { return }
+        _ = try? request(method: "DELETE", path: "/api/account/password/\(rekeyId)", body: nil, contentType: nil)
+    }
+
+    private func installContentKey(_ key: [UInt8], me: [String: Any]) {
+        let installed = Array(key)
+        lock.lock()
+        let ttl = account?.ttlMs ?? 30 * 24 * 60 * 60 * 1000
+        var old = contentKey
+        contentKey = installed
+        account = accountFrom(me, ttl: ttl)
+        lock.unlock()
+        if var old {
+            Bytes.wipe(&old)
+        }
+    }
+
     private func getJSON(_ path: String) throws -> [String: Any] {
         let (status, response) = try request(method: "GET", path: path, body: nil, contentType: nil)
         return try interpret(status, response, session: true)
     }
 
-    private func request(method: String, path: String, body: Data?, contentType: String?) throws -> (Int, Data) {
+    private func request(
+        method: String,
+        path: String,
+        body: Data?,
+        contentType: String?,
+        extraHeaders: [String: String] = [:]
+    ) throws -> (Int, Data) {
         let url = try absolute(path)
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -524,6 +666,9 @@ public final class DropClient: @unchecked Sendable {
         }
         if let contentType {
             request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        }
+        for (field, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
         }
         request.httpBody = body
         let done = DispatchSemaphore(value: 0)
