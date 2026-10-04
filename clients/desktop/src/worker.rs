@@ -42,6 +42,7 @@ pub enum Command {
         next: Zeroizing<String>,
         pin: Zeroizing<String>,
     },
+    DeleteAccount,
     UnlockPin {
         server: String,
         username: String,
@@ -68,6 +69,7 @@ pub enum WorkerEvent {
     PinRejected,
     PinFailed { message: String },
     PasswordChanged { snapshot: Snapshot, pin_kept: bool },
+    AccountDeleted,
 }
 
 pub fn spawn(rx: Receiver<Command>, tx: Sender<WorkerEvent>) -> std::thread::JoinHandle<()> {
@@ -258,6 +260,23 @@ fn run(rx: Receiver<Command>, tx: Sender<WorkerEvent>) {
                     let _ = tx.send(WorkerEvent::PinFailed { message });
                 }
             },
+            Command::DeleteAccount => {
+                let Some(mut current) = client.take() else {
+                    let _ = tx.send(WorkerEvent::Error(DropError::Locked.to_string()));
+                    continue;
+                };
+                match current.delete_account() {
+                    Ok(()) => {
+                        let _ = tx.send(WorkerEvent::AccountDeleted);
+                    }
+                    Err(error) => {
+                        if !matches!(error, DropError::SignedOut) {
+                            client = Some(current);
+                        }
+                        let _ = tx.send(WorkerEvent::Error(error.to_string()));
+                    }
+                }
+            }
             Command::SignOut => {
                 if let Some(mut client) = client.take() {
                     client.sign_out();

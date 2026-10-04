@@ -41,8 +41,14 @@ struct RootView: View {
 private struct SignInView: View {
     @EnvironmentObject private var model: SessionModel
     @Environment(\.colorScheme) private var colorScheme
+    @State private var showSetup = false
+    @State private var setupServer = ""
+    @State private var setupUsername = ""
+    @State private var returning = false
+    @State private var decided = false
 
     private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
+    private var setup: Bool { showSetup || !returning }
 
     var body: some View {
         ScrollView {
@@ -51,57 +57,133 @@ private struct SignInView: View {
                 Text("Sign in")
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(palette.ink)
-                if !model.biometricsOn {
-                    Text("The password unlocks items on this phone. It stays in memory until you close Drop, and it is not saved.")
-                        .font(.subheadline)
-                        .foregroundStyle(palette.muted)
-                }
-                field("Server", text: $model.server, secure: false, placeholder: "https://drop.example")
-                field("Username", text: $model.username, secure: false)
-                field("Password", text: $model.password, secure: true)
-                if model.http || model.server.hasPrefix("http://") {
-                    Text("This connection is not HTTPS. The password still stays on this phone, but the network can see the session.")
-                        .font(.footnote)
-                        .foregroundStyle(palette.muted)
-                }
-                if !model.error.isEmpty {
-                    Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
-                }
-                if model.biometricsOn {
-                    Button(model.status == "Unlocking…" ? "Unlocking…" : model.biometryLabel) {
-                        model.unlockWithBiometrics()
+                if setup {
+                    if !model.biometricsOn {
+                        Text("The password unlocks items on this phone. It stays in memory until you close Drop, and it is not saved.")
+                            .font(.subheadline)
+                            .foregroundStyle(palette.muted)
+                    }
+                    if showSetup && returning {
+                        field("Server", text: $setupServer, secure: false, placeholder: "https://drop.example")
+                        field("Username", text: $setupUsername, secure: false)
+                    } else {
+                        field("Server", text: $model.server, secure: false, placeholder: "https://drop.example")
+                        field("Username", text: $model.username, secure: false)
+                    }
+                    field("Password", text: $model.password, secure: true)
+                    httpNote
+                    if !model.error.isEmpty {
+                        Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
+                    }
+                    Button(model.status == "Signing in…" ? "Signing in…" : "Sign in") {
+                        signInFromSetup()
                     }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(model.busy)
-                    Button(model.status == "Signing in…" ? "Signing in…" : "Use password") {
-                        model.signIn()
+                    if returning {
+                        Button("Back") {
+                            showSetup = false
+                            model.password = ""
+                            model.error = ""
+                        }
+                        .disabled(model.busy)
+                        .foregroundStyle(palette.ink)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(model.busy)
-                    .foregroundStyle(palette.ink)
+                    Text("Accounts are invite-only. Ask the person who runs this Drop for a username. There is no public signup.")
+                        .font(.footnote)
+                        .foregroundStyle(palette.muted)
+                } else if model.pinOn {
+                    field("PIN", text: $model.pinEntry, secure: true, keyboard: .numberPad)
+                    Text("Use 4 to 8 digits.")
+                        .font(.footnote)
+                        .foregroundStyle(palette.muted)
+                    httpNote
+                    if !model.error.isEmpty {
+                        Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
+                    }
+                    biometricButton
+                    setupButton
                 } else {
+                    field("Password", text: $model.password, secure: true)
+                    httpNote
+                    if !model.error.isEmpty {
+                        Text(model.error).font(.subheadline).foregroundStyle(palette.danger)
+                    }
                     Button(model.status == "Signing in…" ? "Signing in…" : "Sign in") {
                         model.signIn()
                     }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(model.busy)
+                    biometricButton
+                    setupButton
                 }
-                if model.pinOn {
-                    field("PIN", text: $model.pinEntry, secure: true, keyboard: .numberPad)
-                    Text("Use 4 to 8 digits.")
-                        .font(.footnote)
-                        .foregroundStyle(palette.muted)
-                }
-                Text("Accounts are invite-only. Ask the person who runs this Drop for a username. There is no public signup.")
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .onAppear {
+            if !decided {
+                let server = model.server.trimmingCharacters(in: .whitespacesAndNewlines)
+                let username = model.username.trimmingCharacters(in: .whitespacesAndNewlines)
+                returning = !server.isEmpty && !username.isEmpty
+                decided = true
+            }
+            model.offerBiometrics()
+        }
+        .onChange(of: model.pinEntry) { _, _ in
+            if returning && !showSetup && model.pinOn {
+                model.notePinEntry()
+            }
+        }
+    }
+
+    private var httpNote: some View {
+        Group {
+            if model.http || model.server.hasPrefix("http://") {
+                Text("This connection is not HTTPS. The password still stays on this phone, but the network can see the session.")
                     .font(.footnote)
                     .foregroundStyle(palette.muted)
             }
         }
-        .scrollDismissesKeyboard(.interactively)
-        .onAppear { model.offerBiometrics() }
-        .onChange(of: model.pinEntry) { _, _ in
-            model.notePinEntry()
+    }
+
+    @ViewBuilder
+    private var biometricButton: some View {
+        if model.biometricsOn {
+            Button(model.status == "Unlocking…" ? "Unlocking…" : model.biometryLabel) {
+                model.unlockWithBiometrics()
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .disabled(model.busy)
         }
+    }
+
+    private var setupButton: some View {
+        Button("Change server or account") {
+            setupServer = model.server
+            setupUsername = model.username
+            model.password = ""
+            model.pinEntry = ""
+            model.error = ""
+            showSetup = true
+        }
+        .disabled(model.busy)
+        .foregroundStyle(palette.ink)
+    }
+
+    private func signInFromSetup() {
+        guard showSetup && returning else {
+            model.signIn()
+            return
+        }
+        let server = setupServer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = setupUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !server.isEmpty, !username.isEmpty, !model.password.isEmpty else {
+            model.error = "Enter the server, username, and password."
+            return
+        }
+        model.server = server
+        model.username = username
+        model.signIn()
     }
 
     private func field(_ title: String, text: Binding<String>, secure: Bool, placeholder: String? = nil, keyboard: UIKeyboardType? = nil) -> some View {
@@ -145,21 +227,16 @@ private struct ClipboardView: View {
             HStack {
                 Wordmark()
                 Spacer()
-                Menu {
-                    Button("Sign out") { model.signOut() }
-                        .disabled(model.busy)
-                    Button("Settings") {
-                        DispatchQueue.main.async { showSettings = true }
-                    }
+                Button {
+                    showSettings = true
                 } label: {
-                    Image(systemName: "line.3.horizontal")
+                    Image(systemName: "gearshape")
                         .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(palette.ink)
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
-                        .accessibilityLabel("Menu")
+                        .accessibilityLabel("Settings")
                 }
-                .menuOrder(.fixed)
                 .buttonStyle(.plain)
             }
             if let account = model.account {
@@ -486,12 +563,15 @@ private struct SettingsView: View {
     @State private var pin = ""
     @State private var pinConfirm = ""
     @State private var currentPin = ""
+    @State private var confirmingDelete = false
+    @State private var deleteName = ""
 
     private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 16) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
                 if model.biometryAvailable {
                     Toggle(model.biometryLabel, isOn: Binding(
                         get: { model.biometricsOn },
@@ -558,10 +638,50 @@ private struct SettingsView: View {
                 if !model.settingsStatus.isEmpty {
                     Text(model.settingsStatus).font(.subheadline).foregroundStyle(palette.muted)
                 }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            Button("Sign out") { model.signOut() }
+                .disabled(model.busy)
+                .foregroundStyle(palette.ink)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Danger zone")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(palette.danger)
+                if confirmingDelete {
+                    field("Username", text: $deleteName, secure: false)
+                    if !model.settingsError.isEmpty {
+                        Text(model.settingsError).font(.subheadline).foregroundStyle(palette.danger)
+                    }
+                    Button(model.settingsBusy.isEmpty ? "Delete account" : model.settingsBusy) {
+                        model.deleteAccount(typed: deleteName)
+                    }
+                    .disabled(model.busy)
+                    .foregroundStyle(palette.danger)
+                    Button("Cancel") {
+                        confirmingDelete = false
+                        deleteName = ""
+                        model.settingsError = ""
+                    }
+                    .disabled(model.busy)
+                    .foregroundStyle(palette.ink)
+                } else {
+                    Button("Delete account") {
+                        confirmingDelete = true
+                        deleteName = ""
+                        model.settingsError = ""
+                    }
+                    .disabled(model.busy)
+                    .foregroundStyle(palette.danger)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(palette.card)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(palette.danger.opacity(0.45)))
         }
-        .scrollDismissesKeyboard(.interactively)
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(palette.background.ignoresSafeArea())
@@ -586,13 +706,13 @@ private struct SettingsView: View {
         currentPin = ""
     }
 
-    private func field(_ title: String, text: Binding<String>, keyboard: UIKeyboardType = .default) -> some View {
+    private func field(_ title: String, text: Binding<String>, secure: Bool = true, keyboard: UIKeyboardType = .default) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).foregroundStyle(palette.ink)
             LineField(
                 text: text,
                 placeholder: title,
-                secure: true,
+                secure: secure,
                 ink: UIColor(palette.ink),
                 muted: UIColor(palette.muted),
                 caret: UIColor(palette.green),

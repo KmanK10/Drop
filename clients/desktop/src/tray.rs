@@ -11,6 +11,7 @@ pub enum TrayAction {
     SetPin(bool),
     ChangePin,
     ChangePassword,
+    DeleteAccount,
     Dropped(Vec<PathBuf>),
 }
 

@@ -379,6 +379,20 @@ public final class DropClient: @unchecked Sendable {
         return try uploadPlain(ItemPlain(kind: .file, name: safeName, mime: safeMime, body: bytes))
     }
 
+    /// Deletes this signed-in account. A refusal leaves the session in place.
+    public func deleteAccount() throws {
+        try ensureUnlocked()
+        let (status, bytes) = try request(method: "DELETE", path: "/api/account", body: nil, contentType: nil)
+        if status == 401 {
+            wipe()
+            clearCookies()
+            throw DropError.signedOut
+        }
+        guard (200..<300).contains(status) else { throw errorFrom(status, bytes) }
+        wipe()
+        clearCookies()
+    }
+
     public func deleteItem(_ id: String) throws -> DropSnapshot {
         try ensureUnlocked()
         let path = try itemPath(id)

@@ -25,6 +25,7 @@ enum AccountForm {
     SetPin,
     ChangePin,
     ChangePassword,
+    DeleteAccount,
 }
 
 /// Same colors as the website. Light stays the cream palette. Dark follows
@@ -152,8 +153,13 @@ struct DropApp {
     pin_attempted: String,
     pin_changed_at: Option<Instant>,
     pin_epoch: u64,
+    returning: bool,
+    show_setup: bool,
+    setup_server: String,
+    setup_username: String,
     form: AccountForm,
     form_error: String,
+    delete_name: String,
     pw_current: String,
     pw_next: String,
     pw_confirm: String,
@@ -185,6 +191,7 @@ impl DropApp {
         let (event_tx, rx) = mpsc::channel();
         let ui_tx = event_tx.clone();
         let worker = worker::spawn(worker_rx, event_tx);
+        let returning = !settings.server_url.trim().is_empty() && !settings.username.trim().is_empty();
         Self {
             settings_path,
             server: settings.server_url,
@@ -212,8 +219,13 @@ impl DropApp {
             pin_attempted: String::new(),
             pin_changed_at: None,
             pin_epoch: 0,
+            returning,
+            show_setup: false,
+            setup_server: String::new(),
+            setup_username: String::new(),
             form: AccountForm::None,
             form_error: String::new(),
+            delete_name: String::new(),
             pw_current: String::new(),
             pw_next: String::new(),
             pw_confirm: String::new(),
@@ -292,6 +304,7 @@ impl DropApp {
             }
             TrayAction::ChangePin => self.open_form(ctx, AccountForm::ChangePin),
             TrayAction::ChangePassword => self.open_form(ctx, AccountForm::ChangePassword),
+            TrayAction::DeleteAccount => self.open_form(ctx, AccountForm::DeleteAccount),
             TrayAction::Dropped(paths) => {
                 show_window(ctx);
                 if self.account.is_none() {
@@ -398,10 +411,13 @@ impl DropApp {
                 self.items.clear();
                 self.busy = false;
                 self.status.clear();
+                self.show_setup = false;
+                self.note_returning();
                 self.http = self.server.trim().starts_with("http://");
                 self.update_tooltip();
                 show_window(ctx);
             }
+            WorkerEvent::AccountDeleted => self.account_deleted(ctx),
             WorkerEvent::Copy(payload) => {
                 self.busy = false;
                 match write_clipboard(payload) {
@@ -515,6 +531,7 @@ impl DropApp {
             show_window(ctx);
             self.error = match form {
                 AccountForm::ChangePassword => "Sign in before changing the password.".into(),
+                AccountForm::DeleteAccount => "Sign in before deleting the account.".into(),
                 _ => "Sign in with your password before turning this on.".into(),
             };
             return;
@@ -547,6 +564,7 @@ impl DropApp {
         self.pw_next.clear();
         self.pw_confirm.zeroize();
         self.pw_confirm.clear();
+        self.delete_name.clear();
     }
 
     fn clear_pin(&mut self) {
@@ -649,7 +667,7 @@ impl DropApp {
     }
 
     fn poll_pin(&mut self) {
-        if self.account.is_some() || !self.pin_on || self.busy || self.pin_entry == self.pin_attempted {
+        if self.account.is_some() || !self.returning || self.show_setup || !self.pin_on || self.busy || self.pin_entry == self.pin_attempted {
             return;
         }
         if drop_core::pin_rejection(&self.pin_entry, None).is_some() {
@@ -663,14 +681,50 @@ impl DropApp {
     }
 
     fn sign_out(&mut self) {
+        self.forget_local_unlock();
+        self.busy = true;
+        self.send(Command::SignOut);
+    }
+
+    fn forget_local_unlock(&mut self) {
         self.biometric_epoch = self.biometric_epoch.wrapping_add(1);
         biometric::delete();
         self.biometrics = false;
         self.refresh_biometrics = false;
         self.close_form();
         self.clear_pin();
+    }
+
+    fn account_deleted(&mut self, ctx: &Context) {
+        self.forget_local_unlock();
+        self.account = None;
+        self.items.clear();
+        self.busy = false;
+        self.status.clear();
+        self.error.clear();
+        self.show_setup = false;
+        self.note_returning();
+        self.http = self.server.trim().starts_with("http://");
+        self.update_tooltip();
+        show_window(ctx);
+    }
+
+    fn note_returning(&mut self) {
+        self.returning = !self.server.trim().is_empty() && !self.username.trim().is_empty();
+    }
+
+    fn submit_delete(&mut self) {
+        if self.busy {
+            return;
+        }
+        let expected = self.account.as_ref().map(|account| account.username.as_str()).unwrap_or("");
+        if !names_match(&self.delete_name, expected) {
+            self.form_error = "Type your username to confirm.".into();
+            return;
+        }
         self.busy = true;
-        self.send(Command::SignOut);
+        self.form_error.clear();
+        self.send(Command::DeleteAccount);
     }
 
     fn unlock_with_biometrics(&mut self) {
@@ -731,12 +785,14 @@ impl DropApp {
     }
 
     fn submit_sign_in(&mut self) {
-        let server = self.server.trim().to_string();
-        let username = self.username.trim().to_string();
+        let server = if self.show_setup { self.setup_server.trim() } else { self.server.trim() }.to_string();
+        let username = if self.show_setup { self.setup_username.trim() } else { self.username.trim() }.to_string();
         if server.is_empty() || username.is_empty() || self.password.is_empty() {
             self.error = "Enter the server, username, and password.".into();
             return;
         }
+        self.server = server.clone();
+        self.username = username.clone();
         let _ = save_settings(
             &self.settings_path,
             &Settings {
@@ -763,24 +819,138 @@ impl DropApp {
         wordmark(ui);
         ui.add_space(8.0);
         ui.label(RichText::new("Sign in").size(18.0).strong().color(colors.ink));
-        ui.label(
-            RichText::new("The password unlocks items on this device. It is kept in memory until you quit Drop, and it is not saved.")
+        let setup = self.show_setup || !self.returning;
+        if setup {
+            ui.label(
+                RichText::new("The password unlocks items on this device. It is kept in memory until you quit Drop, and it is not saved.")
+                    .color(colors.muted)
+                    .size(13.0),
+            );
+            ui.add_space(8.0);
+            if self.show_setup && self.returning {
+                labeled(ui, "Server", &mut self.setup_server, SERVER_HINT);
+                labeled(ui, "Username", &mut self.setup_username, "");
+            } else {
+                labeled(ui, "Server", &mut self.server, SERVER_HINT);
+                labeled(ui, "Username", &mut self.username, "");
+            }
+            self.password_field(ui);
+            self.http_note(ui);
+            notice(ui, &self.error, &self.status);
+            ui.add_space(8.0);
+            self.sign_in_button(ui, &colors);
+            if self.returning {
+                if ui.add_enabled(!self.busy, Button::new("Back")).clicked() {
+                    self.show_setup = false;
+                    self.password.zeroize();
+                    self.password.clear();
+                    self.error.clear();
+                }
+            }
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(format!(
+                    "Accounts are invite-only. Ask the person who runs this Drop for a username. {}",
+                    close_note()
+                ))
                 .color(colors.muted)
-                .size(13.0),
-        );
-        ui.add_space(8.0);
-        labeled(ui, "Server", &mut self.server, SERVER_HINT);
-        labeled(ui, "Username", &mut self.username, "");
+                .size(12.0),
+            );
+        } else if self.pin_on {
+            self.pin_field(ui);
+            self.http_note(ui);
+            notice(ui, &self.error, &self.status);
+            self.biometric_button(ui);
+            self.setup_button(ui);
+        } else {
+            self.password_field(ui);
+            self.http_note(ui);
+            notice(ui, &self.error, &self.status);
+            ui.add_space(8.0);
+            self.sign_in_button(ui, &colors);
+            self.biometric_button(ui);
+            self.setup_button(ui);
+        }
+    }
+
+    fn password_field(&mut self, ui: &mut egui::Ui) {
+        let colors = colors(ui);
         ui.label(RichText::new("Password").color(colors.ink));
         let password_id = egui::Id::new(("drop-password", self.password_epoch));
-        ui.add(
+        let response = ui.add(
             TextEdit::singleline(&mut self.password)
                 .password(true)
                 .id(password_id)
                 .desired_width(f32::INFINITY)
                 .hint_text("Password"),
         );
+        if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            self.submit_sign_in();
+        }
+    }
+
+    fn pin_field(&mut self, ui: &mut egui::Ui) {
+        let colors = colors(ui);
+        ui.label(RichText::new("PIN").color(colors.ink));
+        let response = ui.add(
+            TextEdit::singleline(&mut self.pin_entry)
+                .password(true)
+                .desired_width(f32::INFINITY)
+                .hint_text("4 to 8 digits"),
+        );
+        ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
+        if response.changed() {
+            self.pin_changed_at = Some(Instant::now());
+            self.poll_pin();
+        }
+        if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            if let Some(problem) = drop_core::pin_rejection(&self.pin_entry, None) {
+                self.error = problem.into();
+            } else {
+                self.pin_attempted.clear();
+                self.pin_changed_at = Some(Instant::now() - Duration::from_secs(1));
+                self.poll_pin();
+            }
+        }
+    }
+
+    fn sign_in_button(&mut self, ui: &mut egui::Ui, colors: &Palette) {
+        let button = ui.add_enabled(
+            !self.busy,
+            primary_button(if self.busy { "Signing in…" } else { "Sign in" }, colors),
+        );
+        if button.clicked() {
+            self.submit_sign_in();
+        }
+    }
+
+    fn biometric_button(&mut self, ui: &mut egui::Ui) {
+        if !self.biometrics {
+            return;
+        }
+        ui.add_space(8.0);
+        let unlock = ui.add_enabled(!self.busy, Button::new(biometric::label()));
+        if unlock.clicked() {
+            self.unlock_with_biometrics();
+        }
+    }
+
+    fn setup_button(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(12.0);
+        if ui.add_enabled(!self.busy, Button::new("Change server or account")).clicked() {
+            self.setup_server = self.server.clone();
+            self.setup_username = self.username.clone();
+            self.password.zeroize();
+            self.password.clear();
+            self.pin_entry.clear();
+            self.error.clear();
+            self.show_setup = true;
+        }
+    }
+
+    fn http_note(&self, ui: &mut egui::Ui) {
         if self.http || self.server.trim().starts_with("http://") {
+            let colors = colors(ui);
             ui.add_space(6.0);
             ui.label(
                 RichText::new("This connection is not HTTPS. The password still stays on this device, but the network can see the session.")
@@ -788,55 +958,6 @@ impl DropApp {
                     .size(12.0),
             );
         }
-        notice(ui, &self.error, &self.status);
-        ui.add_space(8.0);
-        let button = ui.add_enabled(
-            !self.busy,
-            primary_button(if self.busy { "Signing in…" } else { "Sign in" }, &colors),
-        );
-        if button.clicked() {
-            self.submit_sign_in();
-        }
-        if self.biometrics {
-            ui.add_space(8.0);
-            let unlock = ui.add_enabled(!self.busy, Button::new(biometric::label()));
-            if unlock.clicked() {
-                self.unlock_with_biometrics();
-            }
-        }
-        if self.pin_on {
-            ui.add_space(8.0);
-            ui.label(RichText::new("PIN").color(colors.ink));
-            let response = ui.add(
-                TextEdit::singleline(&mut self.pin_entry)
-                    .password(true)
-                    .desired_width(f32::INFINITY)
-                    .hint_text("4 to 8 digits"),
-            );
-            ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
-            if response.changed() {
-                self.pin_changed_at = Some(Instant::now());
-                self.poll_pin();
-            }
-            if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                if let Some(problem) = drop_core::pin_rejection(&self.pin_entry, None) {
-                    self.error = problem.into();
-                } else {
-                    self.pin_attempted.clear();
-                    self.pin_changed_at = Some(Instant::now() - Duration::from_secs(1));
-                    self.poll_pin();
-                }
-            }
-        }
-        ui.add_space(12.0);
-        ui.label(
-            RichText::new(format!(
-                "Accounts are invite-only. Ask the person who runs this Drop for a username. {}",
-                close_note()
-            ))
-            .color(colors.muted)
-            .size(12.0),
-        );
     }
 
     fn clipboard_ui(&mut self, ui: &mut egui::Ui, #[allow(unused_variables)] ctx: &Context) {
@@ -1001,12 +1122,14 @@ impl DropApp {
             AccountForm::SetPin => "Set PIN",
             AccountForm::ChangePin => "Change PIN",
             AccountForm::ChangePassword => "Change password",
+            AccountForm::DeleteAccount => "Delete account",
             AccountForm::None => "Drop",
         };
+        let height = if self.form == AccountForm::DeleteAccount { 280.0 } else { 460.0 };
         let builder = egui::ViewportBuilder::default()
             .with_title(title)
-            .with_inner_size([400.0, 460.0])
-            .with_min_inner_size([360.0, 280.0])
+            .with_inner_size([400.0, height])
+            .with_min_inner_size([360.0, 240.0])
             .with_resizable(false);
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("drop-account-form"),
@@ -1063,6 +1186,22 @@ impl DropApp {
                     let label = if self.busy { "Saving…" } else { "Save" };
                     if ui.add_enabled(!self.busy, primary_button(label, &colors)).clicked() {
                         self.save_password();
+                    }
+                    if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+                        self.close_form();
+                    }
+                });
+            }
+            AccountForm::DeleteAccount => {
+                ui.label(RichText::new("Danger zone").strong().color(colors.danger));
+                ui.label(RichText::new("Type your username, then delete the account.").color(colors.muted).size(12.0));
+                labeled(ui, "Username", &mut self.delete_name, "Username");
+                notice(ui, &self.form_error, "");
+                ui.horizontal(|ui| {
+                    let label = if self.busy { "Deleting…" } else { "Delete account" };
+                    let delete = ui.add_enabled(!self.busy, Button::new(RichText::new(label).color(colors.danger)));
+                    if delete.clicked() {
+                        self.submit_delete();
                     }
                     if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
                         self.close_form();
@@ -1204,6 +1343,12 @@ fn wordmark(ui: &mut egui::Ui) {
             ui.label(RichText::new("Private clipboard").size(11.0).color(colors.muted));
         });
     });
+}
+
+fn names_match(typed: &str, expected: &str) -> bool {
+    let typed = typed.trim();
+    let expected = expected.trim();
+    !typed.is_empty() && typed.eq_ignore_ascii_case(expected)
 }
 
 fn secret_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {

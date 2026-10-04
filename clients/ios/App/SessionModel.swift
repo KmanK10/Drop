@@ -84,6 +84,45 @@ final class SessionModel: ObservableObject {
         }
     }
 
+    func deleteAccount(typed: String) {
+        guard let client, let account else {
+            settingsError = DropError.locked.text
+            return
+        }
+        let expected = account.username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let given = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !given.isEmpty, given.compare(expected, options: .caseInsensitive) == .orderedSame else {
+            settingsError = "Type your username to confirm."
+            return
+        }
+        busy = true
+        settingsBusy = "Deleting…"
+        settingsError = ""
+        settingsStatus = ""
+        work.async { [weak self] in
+            do {
+                try client.deleteAccount()
+                DispatchQueue.main.async {
+                    self?.signOut()
+                }
+            } catch {
+                let text = (error as? DropError)?.text ?? error.localizedDescription
+                let signedOut = (error as? DropError) == .signedOut
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.settingsBusy = ""
+                    self.busy = false
+                    if signedOut {
+                        self.signOut()
+                        self.error = text
+                    } else {
+                        self.settingsError = text
+                    }
+                }
+            }
+        }
+    }
+
     func signOut() {
         biometricTicket += 1
         BiometricStore.delete()

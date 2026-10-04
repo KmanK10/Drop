@@ -513,6 +513,24 @@ impl DropClient {
         })
     }
 
+    /// Deletes this signed-in account and the items that belong to it.
+    /// A refusal, including the last admin, leaves the session in place.
+    pub fn delete_account(&mut self) -> Result<(), DropError> {
+        self.ensure_unlocked()?;
+        let (status, bytes) = self.request(reqwest::Method::DELETE, "/api/account", None, None)?;
+        if status == 401 {
+            self.zero_local();
+            self.jar.clear();
+            return Err(DropError::SignedOut);
+        }
+        if !(200..300).contains(&status) {
+            return Err(error_from(status, &bytes));
+        }
+        self.zero_local();
+        self.jar.clear();
+        Ok(())
+    }
+
     pub fn delete_item(&mut self, id: &str) -> Result<Snapshot, DropError> {
         self.ensure_unlocked()?;
         let path = item_path(id)?;

@@ -58,6 +58,7 @@ const ID_CLOSE: usize = 5;
 const ID_QUIT: usize = 6;
 const ID_CHANGE_PIN: usize = 7;
 const ID_PASSWORD: usize = 8;
+const ID_DELETE: usize = 9;
 
 /// Window and icon handles are thread-safe values. The tray thread creates them
 /// and the UI thread only posts messages to the window.
@@ -364,6 +365,7 @@ fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
             let _ = AppendMenuW(menu, MF_STRING, ID_PIN, w!("Set PIN"));
         }
         let _ = AppendMenuW(menu, MF_STRING, ID_PASSWORD, w!("Change password"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_DELETE, w!("Delete account"));
         let _ = AppendMenuW(menu, MF_STRING, ID_SIGNOUT, w!("Sign out"));
         let close_flags = if crate::window_prefs::close_to_menu_bar() {
             MF_STRING | MF_CHECKED
@@ -392,6 +394,7 @@ fn popup_menu(hwnd: HWND) -> Option<TrayAction> {
             ID_PIN => Some(TrayAction::SetPin(!crate::pin::enrolled())),
             ID_CHANGE_PIN => Some(TrayAction::ChangePin),
             ID_PASSWORD => Some(TrayAction::ChangePassword),
+            ID_DELETE => Some(TrayAction::DeleteAccount),
             ID_SIGNOUT => Some(TrayAction::SignOut),
             ID_CLOSE => {
                 crate::window_prefs::toggle();

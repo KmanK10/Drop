@@ -220,6 +220,10 @@ unsafe fn status_target_class() -> &'static AnyClass {
             menu_change_password as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
         builder.add_method(
+            sel!(menuDeleteAccount:),
+            menu_delete_account as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+        );
+        builder.add_method(
             sel!(menuCloseToMenuBar:),
             menu_close_to_menu_bar as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
         );
@@ -301,6 +305,10 @@ extern "C" fn menu_change_password(_this: *mut AnyObject, _cmd: Sel, _sender: *m
     emit(TrayAction::ChangePassword);
 }
 
+extern "C" fn menu_delete_account(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+    emit(TrayAction::DeleteAccount);
+}
+
 extern "C" fn menu_close_to_menu_bar(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
     crate::window_prefs::toggle();
 }
@@ -353,6 +361,8 @@ unsafe fn install_application_menu(target: *mut AnyObject) {
         at += 1;
         insert_item(app_menu, "Change password", sel!(menuChangePassword:), false, at);
         at += 1;
+        insert_item(app_menu, "Delete account", sel!(menuDeleteAccount:), false, at);
+        at += 1;
         insert_item(app_menu, "Sign out", sel!(menuSignOut:), false, at);
         at += 1;
         insert_item(
@@ -387,6 +397,7 @@ unsafe fn install_dock_menu(target: *mut AnyObject) {
     add_item(menu, if crate::pin::enrolled() { "PIN" } else { "Set PIN" }, sel!(menuPin:), crate::pin::enrolled());
     add_item(menu, "Change PIN", sel!(menuChangePin:), false);
     add_item(menu, "Change password", sel!(menuChangePassword:), false);
+    add_item(menu, "Delete account", sel!(menuDeleteAccount:), false);
     add_item(menu, "Sign out", sel!(menuSignOut:), false);
     add_item(menu, "Quit", sel!(menuQuit:), false);
     let _: () = msg_send![menu, setDelegate: target];
@@ -427,12 +438,21 @@ unsafe fn refresh_menu(menu: *mut AnyObject, app_menu: bool) {
         insert_item(menu, "Change PIN", sel!(menuChangePin:), false, at);
     }
     if !menu_has_action(menu, sel!(menuChangePassword:)) {
-        let at = find_action(menu, sel!(menuSignOut:))
+        let at = find_action(menu, sel!(menuDeleteAccount:))
+            .or_else(|| find_action(menu, sel!(menuSignOut:)))
             .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
             .or_else(|| find_action(menu, sel!(menuQuit:)))
             .or_else(|| find_action(menu, sel!(terminate:)))
             .unwrap_or_else(|| item_count(menu));
         insert_item(menu, "Change password", sel!(menuChangePassword:), false, at);
+    }
+    if !menu_has_action(menu, sel!(menuDeleteAccount:)) {
+        let at = find_action(menu, sel!(menuSignOut:))
+            .or_else(|| find_action(menu, sel!(menuCloseToMenuBar:)))
+            .or_else(|| find_action(menu, sel!(menuQuit:)))
+            .or_else(|| find_action(menu, sel!(terminate:)))
+            .unwrap_or_else(|| item_count(menu));
+        insert_item(menu, "Delete account", sel!(menuDeleteAccount:), false, at);
     }
     if app_menu && !menu_has_action(menu, sel!(menuCloseToMenuBar:)) {
         let at = find_action(menu, sel!(menuQuit:))
@@ -552,6 +572,7 @@ extern "C" fn right_mouse_up(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObj
             add_item(menu, "Change PIN", sel!(menuChangePin:), false);
         }
         add_item(menu, "Change password", sel!(menuChangePassword:), false);
+        add_item(menu, "Delete account", sel!(menuDeleteAccount:), false);
         add_item(menu, "Sign out", sel!(menuSignOut:), false);
         add_item(menu, "Quit", sel!(menuQuit:), false);
         let _: () = msg_send![class!(NSMenu), popUpContextMenu: menu withEvent: event forView: this];

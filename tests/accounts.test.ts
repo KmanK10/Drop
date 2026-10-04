@@ -274,4 +274,43 @@ describe("quota, roles, expiry, and password changes", () => {
     expect(disk.includes("member-password-new")).toBe(false);
     expect(disk.includes("member-password-ok")).toBe(false);
   });
+
+  it("deletes the signed-in account and their items, and refuses the last admin", async () => {
+    const session = await boot();
+    opened.push(session);
+    const { app, cookie } = session;
+    expect((await send(app, "/api/account", { method: "DELETE" })).status).toBe(401);
+
+    const member = await addUser(app, cookie, "bea", "user", "member-password-ok");
+    const key = await importContentKey(member.material.contentKey);
+    const text = await encrypt(
+      key,
+      encodeItem({ kind: "text", name: "", mime: "text/plain", body: utf8("bea-delete-marker") }),
+    );
+    const created = await send(app, "/api/items", { method: "POST", body: text, cookie: member.cookie });
+    expect(created.status).toBe(201);
+    const item = (await created.json()) as { id: string };
+    const downloaded = new Uint8Array(
+      await (await send(app, `/api/items/${item.id}`, { method: "GET", cookie: member.cookie })).arrayBuffer(),
+    );
+    const piece = Buffer.from(downloaded.subarray(16, 40));
+    expect(readDataDir(session.dir).includes(piece)).toBe(true);
+
+    const refused = await send(app, "/api/account", { method: "DELETE", cookie });
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: string }).error).toBe("Drop needs at least one admin.");
+    expect((await send(app, "/api/me", { method: "GET", cookie })).status).toBe(200);
+
+    expect((await send(app, "/api/account", { method: "DELETE", cookie: member.cookie })).status).toBe(200);
+    expect((await send(app, "/api/me", { method: "GET", cookie: member.cookie })).status).toBe(401);
+    expect((await send(app, `/api/items/${item.id}`, { method: "GET", cookie })).status).toBe(404);
+    expect(readDataDir(session.dir).includes(piece)).toBe(false);
+    expect(readDataDir(session.dir).includes("bea-delete-marker")).toBe(false);
+
+    const other = await addUser(app, cookie, "cara", "admin", "other-admin-password");
+    expect((await send(app, "/api/account", { method: "DELETE", cookie })).status).toBe(200);
+    expect((await send(app, "/api/me", { method: "GET", cookie })).status).toBe(401);
+    expect((await send(app, "/api/account", { method: "DELETE", cookie: other.cookie })).status).toBe(409);
+    expect((await send(app, "/api/me", { method: "GET", cookie: other.cookie })).status).toBe(200);
+  });
 });
