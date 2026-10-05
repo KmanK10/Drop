@@ -88,10 +88,9 @@ pub fn taskbar_rgba(size: u32) -> Vec<u8> {
     let aa = 0.7 / size as f32;
     let line_h = 0.035_f32.max(2.2 / size as f32);
     let show_detail = size >= 32;
-    // Windows 11 taskbar tiles are rounded. A square plate reads as a sharp
-    // corner next to the other apps. 0.22 is a little tighter than the first
-    // pass, and the pixels outside that arc stay clear.
-    let tile = 0.22;
+    // A typical Windows 11 app icon is only slightly rounded, about a tenth
+    // of the tile. The pixels outside that arc stay clear.
+    let tile = 0.11;
     for y in 0..size {
         let ny = (y as f32 + 0.5) / size as f32;
         for x in 0..size {
