@@ -102,8 +102,8 @@ fn write_icon(path: &std::path::Path) {
     let mut images = Vec::with_capacity(SIZES.len());
     for size in SIZES {
         let rgba = taskbar_icon::taskbar_rgba(size);
-        // At 16 and 32 the 0.045 arc is smaller than the corner pixel, so that
-        // pixel stays covered. From 64 up the corner sample is outside the arc.
+        // At 16 the corner pixel stays covered. At 32 it is only partly
+        // covered. From 64 up the corner sample is outside the arc.
         if size >= 64 {
             assert_eq!(rgba[3], 0, "taskbar icon corner must be transparent at {size}");
         }

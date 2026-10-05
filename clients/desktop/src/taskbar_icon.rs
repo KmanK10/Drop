@@ -6,7 +6,7 @@
 
 /// Corner radius as a fraction of the tile. Just a slight round: the pixels
 /// outside the arc stay clear, and the edge is anti-aliased.
-pub const TILE_RADIUS: f32 = 0.045;
+pub const TILE_RADIUS: f32 = 0.06;
 
 /// Integer id of the ICON resource `build.rs` links into the exe.
 pub const ICON_RESOURCE_ID: u16 = 1;
