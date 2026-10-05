@@ -111,8 +111,9 @@ mod icon_tests {
         assert_eq!(pixel(size - 1, 0).3, 0, "top right");
         assert_eq!(pixel(0, size - 1).3, 0, "bottom left");
         assert_eq!(pixel(size - 1, size - 1).3, 0, "bottom right");
-        assert_eq!(pixel(1, 1).3, 0, "the corner is still rounded {:?}", pixel(1, 1));
-        assert!(pixel(4, 4).3 > 200, "a Windows 11-sized radius covers this pixel {:?}", pixel(4, 4));
+        let feather = pixel(0, 1);
+        assert!(feather.3 > 20 && feather.3 < 240, "the corner arc is anti-aliased {feather:?}");
+        assert!(pixel(1, 1).3 > 200, "a slight radius still covers this pixel {:?}", pixel(1, 1));
         let edge = pixel(size / 2, 0);
         assert!(edge.3 > 200, "middle of the top edge stays on the tile {edge:?}");
         let page = pixel(size / 2, (size as f32 * 0.78) as u32);
