@@ -1,7 +1,13 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+
+use image::ImageEncoder;
+
+#[path = "src/taskbar_icon.rs"]
+mod taskbar_icon;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -16,27 +22,32 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "windows" {
         return;
     }
-    println!("cargo:rerun-if-changed=make-windows-icon.py");
-    println!("cargo:rerun-if-changed=make-icon.py");
+    // The embedded icon is taskbar_icon::taskbar_rgba. Rebuild when that
+    // drawing changes so the exe resource cannot keep an older radius.
+    println!("cargo:rerun-if-changed=src/taskbar_icon.rs");
 
-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let ico = out_dir.join("Drop.ico");
-    let python = Command::new("python3")
-        .arg(manifest.join("make-windows-icon.py"))
-        .arg(&ico)
-        .status()
-        .unwrap_or_else(|error| panic!("python3 is required to build the Windows icon: {error}"));
-    if !python.success() {
-        panic!("make-windows-icon.py failed");
-    }
+    write_icon(&ico);
+
+    // OUT_DIR is target/<triple>/<profile>/build/drop-desktop-<hash>/out.
+    // The installer reads Drop.ico from the profile directory, next to the exe.
+    let mut beside_exe = out_dir.clone();
+    beside_exe.pop();
+    beside_exe.pop();
+    beside_exe.pop();
+    beside_exe.push("Drop.ico");
+    fs::copy(&ico, &beside_exe).unwrap_or_else(|error| {
+        panic!("copy {} to {}: {error}", ico.display(), beside_exe.display())
+    });
 
     let ico_rc = ico.display().to_string().replace('\\', "/");
+    let id = taskbar_icon::ICON_RESOURCE_ID;
     let rc_path = out_dir.join("drop.rc");
     fs::write(
         &rc_path,
         format!(
-            r#"1 ICON "{ico_rc}"
+            r#"{id} ICON "{ico_rc}"
 
 1 VERSIONINFO
 FILEVERSION 1,0,0,0
@@ -84,4 +95,53 @@ END
         panic!("{windres} failed");
     }
     println!("cargo:rustc-link-arg-bins={}", res.display());
+}
+
+fn write_icon(path: &std::path::Path) {
+    const SIZES: [u32; 5] = [16, 32, 64, 128, 256];
+    let mut images = Vec::with_capacity(SIZES.len());
+    for size in SIZES {
+        let rgba = taskbar_icon::taskbar_rgba(size);
+        // At 16 and 32 the 0.045 arc is smaller than the corner pixel, so that
+        // pixel stays covered. From 64 up the corner sample is outside the arc.
+        if size >= 64 {
+            assert_eq!(rgba[3], 0, "taskbar icon corner must be transparent at {size}");
+        }
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, size, size, image::ExtendedColorType::Rgba8)
+            .unwrap_or_else(|error| panic!("encode {size}px taskbar icon: {error}"));
+        images.push((size, png));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create icon directory");
+    }
+    let mut file = fs::File::create(path).expect("create Drop.ico");
+    file.write_all(&pack_ico(&images)).expect("write Drop.ico");
+}
+
+/// Vista-style icon: PNG images inside an ICO directory.
+fn pack_ico(images: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let count = images.len() as u16;
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    let mut offset = 6 + 16 * images.len() as u32;
+    let mut payload = Vec::new();
+    for (width, data) in images {
+        let stored = if *width >= 256 { 0 } else { *width as u8 };
+        out.push(stored);
+        out.push(stored);
+        out.push(0);
+        out.push(0);
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&32u16.to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+        offset += data.len() as u32;
+        payload.extend_from_slice(data);
+    }
+    out.extend_from_slice(&payload);
+    out
 }

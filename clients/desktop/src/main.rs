@@ -107,6 +107,8 @@ mod icon_tests {
             let index = ((y * size + x) * 4) as usize;
             (rgba[index], rgba[index + 1], rgba[index + 2], rgba[index + 3])
         };
+        assert_eq!(super::icon::TILE_RADIUS, 0.045);
+        assert_eq!(super::icon::ICON_RESOURCE_ID, 1);
         assert_eq!(pixel(0, 0).3, 0, "top left");
         assert_eq!(pixel(size - 1, 0).3, 0, "top right");
         assert_eq!(pixel(0, size - 1).3, 0, "bottom left");

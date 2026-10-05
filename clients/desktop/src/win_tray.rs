@@ -35,14 +35,14 @@ use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, 
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     DispatchMessageW, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMessageW, GetWindowTextW,
-    GetWindowThreadProcessId, ICON_BIG, IsIconic, MF_CHECKED, MF_SEPARATOR, MB_ICONINFORMATION, MB_OK, MF_STRING, MSG,
-    MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage,
-    UnhookWindowsHookEx, DestroyIcon, HHOOK, HICON, HMENU, ICONINFO, LWA_ALPHA, SWP_NOACTIVATE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN,
-    TPM_RIGHTBUTTON, WH_MOUSE_LL, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
-    WM_RBUTTONUP, WM_SETICON, WM_USER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    GetWindowThreadProcessId, ICON_BIG, IMAGE_ICON, IsIconic, LoadImageW, LR_DEFAULTCOLOR, MF_CHECKED, MF_SEPARATOR,
+    MB_ICONINFORMATION, MB_OK, MF_STRING, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassW,
+    SendMessageW, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, DestroyIcon, HHOOK, HICON, HMENU, ICONINFO, LWA_ALPHA,
+    SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, WH_MOUSE_LL, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_GETICON,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETICON, WM_USER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_LBUTTON, VK_MENU,
@@ -781,36 +781,52 @@ pub fn reveal_main_window() {
 }
 
 static TASKBAR_ICON: Mutex<Option<SendHandle>> = Mutex::new(None);
-static TASKBAR_APPLIED: Mutex<u32> = Mutex::new(0);
 
-/// The taskbar button uses the big icon. The title bar keeps the green D,
-/// which eframe installs as the small icon. Reapply for a short while so a
-/// later frame cannot put the green D back on the taskbar.
+/// The taskbar button uses the big icon. That icon is the exe's embedded
+/// resource (the same pixels `build.rs` links), kept for the life of the
+/// process. The title bar keeps the green D, which is the small icon.
+///
+/// The window is the top-level one titled Drop, skipping the notification-area
+/// windows and the title-bar menu. A later frame can replace the big icon
+/// with the green D, so this sets it again whenever it is not the resource.
 pub fn apply_taskbar_icon() {
-    if *TASKBAR_APPLIED.lock().expect("taskbar count") > 60 {
-        return;
-    }
     let Some(hwnd) = find_main_window() else {
         return;
     };
-    let Some(icon) = taskbar_hicon() else {
+    let Some(icon) = embedded_taskbar_icon() else {
         return;
     };
+    let wanted = unpack_icon(icon).0 as isize;
     unsafe {
-        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(unpack_icon(icon).0 as isize));
+        let current = SendMessageW(hwnd, WM_GETICON, WPARAM(ICON_BIG as usize), LPARAM(0));
+        if current.0 == wanted {
+            return;
+        }
+        let _ = SendMessageW(hwnd, WM_SETICON, WPARAM(ICON_BIG as usize), LPARAM(wanted));
     }
-    *TASKBAR_APPLIED.lock().expect("taskbar count") += 1;
 }
 
-fn taskbar_hicon() -> Option<SendHandle> {
+/// Load ICON resource 1 from this exe at 256px. The handle is not destroyed:
+/// it has to stay valid for WM_SETICON. This is not the notification glyph.
+fn embedded_taskbar_icon() -> Option<SendHandle> {
     if let Some(icon) = TASKBAR_ICON.lock().expect("taskbar icon").as_ref().copied() {
         return Some(icon);
     }
-    let rgba = icon::taskbar_rgba(256);
-    let icon = icon_from_rgba(256, 256, &rgba).ok()?;
-    let packed = pack_icon(icon);
-    *TASKBAR_ICON.lock().expect("taskbar icon") = Some(packed);
-    Some(packed)
+    unsafe {
+        let module = GetModuleHandleW(None).ok()?;
+        let handle = LoadImageW(
+            HINSTANCE(module.0),
+            PCWSTR(icon::ICON_RESOURCE_ID as usize as *const u16),
+            IMAGE_ICON,
+            256,
+            256,
+            LR_DEFAULTCOLOR,
+        )
+        .ok()?;
+        let packed = pack_icon(HICON(handle.0));
+        *TASKBAR_ICON.lock().expect("taskbar icon") = Some(packed);
+        Some(packed)
+    }
 }
 
 fn find_main_window() -> Option<HWND> {
@@ -829,7 +845,7 @@ unsafe extern "system" fn enum_main_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
         return BOOL(1);
     }
     let class = window_string(hwnd, true);
-    if class == "DropTrayWindow" || class == "DropTrayOverlay" {
+    if class == "DropTrayWindow" || class == "DropTrayOverlay" || class == "DropMenuBar" {
         return BOOL(1);
     }
     if window_string(hwnd, false) == "Drop" {
