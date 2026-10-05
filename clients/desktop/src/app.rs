@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -108,6 +109,7 @@ pub fn run() -> Result<(), String> {
             .with_inner_size([440.0, 720.0])
             .with_min_inner_size([380.0, 520.0])
             .with_title("Drop")
+            .with_drag_and_drop(true)
             .with_icon(egui::IconData {
                 rgba,
                 width: 64,
@@ -142,6 +144,10 @@ struct DropApp {
     busy: bool,
     quit: bool,
     pending_drops: Vec<PathBuf>,
+    /// A file drag is over this window. The taskbar button cannot take the drop
+    /// itself; hovering that button restores this drop target so the files land here.
+    file_hover: bool,
+    preview_textures: HashMap<String, egui::TextureHandle>,
     biometrics: bool,
     /// This Mac has Touch ID. Cached so the sign-in icon does not ask every frame.
     /// Windows does not draw that icon.
@@ -214,6 +220,8 @@ impl DropApp {
             busy: false,
             quit: false,
             pending_drops: Vec::new(),
+            file_hover: false,
+            preview_textures: HashMap::new(),
             biometrics: biometric::enrolled(),
             touch_available: touch_id_hardware(),
             tried_biometrics: false,
@@ -334,6 +342,8 @@ impl DropApp {
                 self.http = snapshot.http;
                 self.account = Some(snapshot.account);
                 self.items = snapshot.items;
+                self.preview_textures
+                    .retain(|id, _| self.items.iter().any(|item| item.id == *id));
                 self.pin_entry.zeroize();
                 self.pin_entry.clear();
                 self.pin_attempted.clear();
@@ -1111,7 +1121,7 @@ impl DropApp {
         ui.add_space(8.0);
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             if self.items.is_empty() {
-                ui.label(RichText::new("Nothing here yet. Drop a file on the tray icon, or save a note.").color(colors.muted));
+                ui.label(RichText::new("Nothing here yet. Drop a file on this window, or save a note.").color(colors.muted));
             }
             let items = self.items.clone();
             for item in items {
@@ -1136,6 +1146,16 @@ impl DropApp {
             .rounding(8.0)
             .show(ui, |ui| {
                 ui.label(RichText::new(&item.title).strong().color(colors.ink));
+                if let Some(preview) = item.preview_text.as_deref().filter(|text| !text.is_empty()) {
+                    ui.label(RichText::new(preview).color(colors.ink).size(13.0));
+                }
+                if let Some(texture) = self.preview_texture(ui.ctx(), item) {
+                    ui.add(
+                        egui::Image::from_texture(&texture)
+                            .max_size(Vec2::new(160.0, 120.0))
+                            .rounding(8.0),
+                    );
+                }
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.label(RichText::new(format!("{} · {}", item.detail, item.when)).color(colors.muted).size(12.0));
@@ -1220,6 +1240,44 @@ impl DropApp {
         self.busy = true;
         self.error.clear();
         self.send(Command::UploadPaths(paths));
+    }
+
+    /// Files dropped on the window use the same upload path as a tray or Dock drop.
+    fn accept_window_drops(&mut self, ctx: &Context) {
+        let (hovering, dropped) = ctx.input(|input| {
+            let hovering = !input.raw.hovered_files.is_empty();
+            let dropped = input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect::<Vec<_>>();
+            (hovering, dropped)
+        });
+        if hovering && !self.file_hover {
+            show_window(ctx);
+        }
+        self.file_hover = hovering;
+        if !dropped.is_empty() {
+            self.file_hover = false;
+            self.on_tray(ctx, TrayAction::Dropped(dropped));
+        }
+    }
+
+    fn preview_texture(&mut self, ctx: &Context, item: &ItemSummary) -> Option<egui::TextureHandle> {
+        if let Some(texture) = self.preview_textures.get(&item.id) {
+            return Some(texture.clone());
+        }
+        let bytes = item.preview_image.as_ref()?;
+        let image = image::load_from_memory(bytes).ok()?;
+        let rgba = image.to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [rgba.width() as usize, rgba.height() as usize],
+            rgba.as_raw(),
+        );
+        let texture = ctx.load_texture(format!("preview-{}", item.id), color, egui::TextureOptions::LINEAR);
+        self.preview_textures.insert(item.id.clone(), texture.clone());
+        Some(texture)
     }
 }
 
@@ -1346,6 +1404,7 @@ impl eframe::App for DropApp {
         #[cfg(target_os = "macos")]
         crate::mac_tray::refresh_command_menus();
         self.pump(ctx);
+        self.accept_window_drops(ctx);
         self.poll_pin();
         self.show_account_form(ctx);
         if self.account.is_none() && !self.tried_biometrics && self.biometrics && !self.busy {
@@ -1367,6 +1426,9 @@ impl eframe::App for DropApp {
                 self.sign_in_ui(ui);
             }
         });
+        if self.file_hover {
+            paint_drop_overlay(ctx);
+        }
         ctx.request_repaint_after(Duration::from_millis(200));
     }
 
@@ -1425,6 +1487,22 @@ fn command_w_pressed(ctx: &Context) -> bool {
         }
         hit
     })
+}
+
+fn paint_drop_overlay(ctx: &Context) {
+    let colors = Palette::for_theme(ctx.theme());
+    let rect = ctx.screen_rect().shrink(8.0);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop-overlay")));
+    let [red, green, blue, _] = colors.green.to_array();
+    painter.rect_filled(rect, 10.0, Color32::from_rgba_unmultiplied(red, green, blue, 36));
+    painter.rect_stroke(rect, 10.0, Stroke::new(2.0_f32, colors.green));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "Drop to upload",
+        egui::FontId::proportional(18.0),
+        colors.ink,
+    );
 }
 
 fn show_window(ctx: &Context) {

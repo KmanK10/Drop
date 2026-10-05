@@ -39,6 +39,10 @@ pub struct ItemSummary {
     pub when: String,
     pub can_copy: bool,
     pub broken: bool,
+    /// Snippet for a text or HTML file. A note already uses its snippet as `title`.
+    pub preview_text: Option<String>,
+    /// Small JPEG thumbnail for a photo. Held in memory and never written to disk.
+    pub preview_image: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -637,20 +641,22 @@ impl DropClient {
         let plain = self.fetch_plain(id)?;
         let now = format::now_ms();
         let kind = plain.kind.as_str().to_string();
-        let (title, detail, can_copy, text) = consume_plain(plain, size);
+        let face = consume_plain(plain, size);
         Ok(MemoryItem {
             summary: ItemSummary {
                 id: id.to_string(),
                 created_at,
                 size,
                 kind,
-                title,
-                detail,
+                title: face.title,
+                detail: face.detail,
                 when: format_when(created_at, now),
-                can_copy,
+                can_copy: face.can_copy,
                 broken: false,
+                preview_text: face.preview_text,
+                preview_image: face.preview_image,
             },
-            text,
+            text: face.text,
         })
     }
 
@@ -915,7 +921,16 @@ fn account_from_me(me: &Value, ttl_ms: u64) -> Result<Account, DropError> {
     })
 }
 
-fn consume_plain(mut plain: ItemPlain, size: u64) -> (String, String, bool, Option<Zeroizing<String>>) {
+struct SummaryFace {
+    title: String,
+    detail: String,
+    can_copy: bool,
+    text: Option<Zeroizing<String>>,
+    preview_text: Option<String>,
+    preview_image: Option<Vec<u8>>,
+}
+
+fn consume_plain(mut plain: ItemPlain, size: u64) -> SummaryFace {
     let summarized = summarize(&plain, size);
     for byte in &mut plain.body {
         *byte = 0;
@@ -923,7 +938,7 @@ fn consume_plain(mut plain: ItemPlain, size: u64) -> (String, String, bool, Opti
     summarized
 }
 
-fn summarize(plain: &ItemPlain, size: u64) -> (String, String, bool, Option<Zeroizing<String>>) {
+fn summarize(plain: &ItemPlain, size: u64) -> SummaryFace {
     match plain.kind {
         ItemKind::Text => {
             let text = String::from_utf8_lossy(&plain.body).into_owned();
@@ -936,7 +951,14 @@ fn summarize(plain: &ItemPlain, size: u64) -> (String, String, bool, Option<Zero
                 }
             };
             let detail = format!("Text · {}", format_bytes(text.len() as u64));
-            (title, detail, true, Some(Zeroizing::new(text)))
+            SummaryFace {
+                title,
+                detail,
+                can_copy: true,
+                text: Some(Zeroizing::new(text)),
+                preview_text: None,
+                preview_image: None,
+            }
         }
         ItemKind::File => {
             let title = if plain.name.trim().is_empty() {
@@ -945,8 +967,23 @@ fn summarize(plain: &ItemPlain, size: u64) -> (String, String, bool, Option<Zero
                 plain.name.clone()
             };
             let detail = format_bytes(size);
-            let can_copy = kind::can_copy_file(&plain.mime);
-            (title, detail, can_copy, None)
+            let file_kind = kind::clipboard_file_kind(&plain.mime);
+            let (preview_text, preview_image) = match file_kind {
+                Some(ClipboardKind::Text) | Some(ClipboardKind::Html) => {
+                    let snippet = crate::preview::text_snippet(&plain.body);
+                    (if snippet.is_empty() { None } else { Some(snippet) }, None)
+                }
+                Some(ClipboardKind::Image) => (None, crate::preview::thumbnail_jpeg(&plain.body)),
+                None => (None, None),
+            };
+            SummaryFace {
+                title,
+                detail,
+                can_copy: kind::can_copy_file(&plain.mime),
+                text: None,
+                preview_text,
+                preview_image,
+            }
         }
     }
 }
@@ -973,6 +1010,8 @@ fn broken_item(id: &str, created_at: i64, size: u64) -> MemoryItem {
             when: format_when(created_at, format::now_ms()),
             can_copy: false,
             broken: true,
+            preview_text: None,
+            preview_image: None,
         },
         text: None,
     }
@@ -1077,4 +1116,64 @@ fn path_matches(cookie_path: &str, request_path: &str) -> bool {
         return true;
     }
     request_path.starts_with(cookie_path)
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::{summarize, ItemKind, ItemPlain};
+
+    #[test]
+    fn notes_and_files_preview_without_leaving_memory() {
+        let note = ItemPlain {
+            kind: ItemKind::Text,
+            name: String::new(),
+            mime: "text/plain".into(),
+            body: b"A short note".to_vec(),
+        };
+        let face = summarize(&note, 12);
+        assert_eq!(face.title, "A short note");
+        assert!(face.preview_text.is_none());
+        assert!(face.preview_image.is_none());
+
+        let text = ItemPlain {
+            kind: ItemKind::File,
+            name: "note.txt".into(),
+            mime: "text/plain".into(),
+            body: b"<p>Hello <b>there</b></p>".to_vec(),
+        };
+        let face = summarize(&text, text.body.len() as u64);
+        assert_eq!(face.title, "note.txt");
+        assert_eq!(face.preview_text.as_deref(), Some("Hello there"));
+        assert!(face.preview_image.is_none());
+        assert_eq!(face.detail, crate::format::format_bytes(text.body.len() as u64));
+
+        let other = ItemPlain {
+            kind: ItemKind::File,
+            name: "archive.zip".into(),
+            mime: "application/zip".into(),
+            body: b"not a preview".to_vec(),
+        };
+        let face = summarize(&other, 13);
+        assert_eq!(face.title, "archive.zip");
+        assert_eq!(face.detail, crate::format::format_bytes(13));
+        assert!(face.preview_text.is_none());
+        assert!(face.preview_image.is_none());
+
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([30, 60, 90])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let photo = ItemPlain {
+            kind: ItemKind::File,
+            name: "shot.png".into(),
+            mime: "image/png".into(),
+            body: png,
+        };
+        let face = summarize(&photo, 100);
+        assert_eq!(face.title, "shot.png");
+        assert_eq!(face.detail, crate::format::format_bytes(100));
+        assert!(face.preview_text.is_none());
+        let jpeg = face.preview_image.expect("photo thumbnail");
+        assert!(jpeg.starts_with(&[0xFF, 0xD8]));
+    }
 }

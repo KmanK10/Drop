@@ -111,6 +111,7 @@ mod icon_tests {
         assert_eq!(pixel(size - 1, 0).3, 0, "top right");
         assert_eq!(pixel(0, size - 1).3, 0, "bottom left");
         assert_eq!(pixel(size - 1, size - 1).3, 0, "bottom right");
+        assert!(pixel(5, 5).3 > 200, "the tighter corner still covers this pixel {:?}", pixel(5, 5));
         let edge = pixel(size / 2, 0);
         assert!(edge.3 > 200, "middle of the top edge stays on the tile {edge:?}");
         let page = pixel(size / 2, (size as f32 * 0.78) as u32);

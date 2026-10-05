@@ -13,6 +13,7 @@ mod format;
 mod item;
 mod kind;
 mod pin;
+mod preview;
 mod settings;
 mod unlock;
 
