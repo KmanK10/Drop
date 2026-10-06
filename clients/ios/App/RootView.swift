@@ -8,6 +8,9 @@ struct RootView: View {
     @EnvironmentObject private var model: SessionModel
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
+    /// Settings is pushed from the stack root, which stays in place across
+    /// sign-in and sign-out, so clearing the session can pop it.
+    @State private var showSettings = false
 
     private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
 
@@ -17,12 +20,20 @@ struct RootView: View {
                 if model.account == nil {
                     SignInView()
                 } else {
-                    ClipboardView()
+                    ClipboardView(showSettings: $showSettings)
                 }
             }
             .padding(20)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(palette.background.ignoresSafeArea())
+            .navigationDestination(isPresented: $showSettings) {
+                SettingsView()
+            }
+        }
+        .onChange(of: model.account == nil) { _, signedOut in
+            // Sign out, Delete account, and an expired session all clear the
+            // account. Return to the sign-in screen instead of leaving Settings up.
+            if signedOut { showSettings = false }
         }
         .background(palette.background.ignoresSafeArea())
         .toolbarBackground(palette.background, for: .navigationBar)
@@ -265,7 +276,7 @@ private struct ClipboardView: View {
     @State private var takingPhoto = false
     @State private var choosingPhoto = false
     @State private var pickingFile = false
-    @State private var showSettings = false
+    @Binding var showSettings: Bool
 
     private var palette: DropPalette { DropPalette.forScheme(colorScheme) }
 
@@ -340,9 +351,6 @@ private struct ClipboardView: View {
             .scrollDismissesKeyboard(.interactively)
         }
         .toolbar(.hidden, for: .navigationBar)
-        .navigationDestination(isPresented: $showSettings) {
-            SettingsView()
-        }
         .fullScreenCover(isPresented: $takingPhoto) {
             CameraPicker(
                 isPresented: $takingPhoto,
