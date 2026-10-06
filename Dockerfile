@@ -16,7 +16,7 @@ ENV NODE_ENV=production \
     DATA_DIR=/data \
     PORT=8080 \
     HOST=0.0.0.0 \
-    PUBLIC_URL=https://drop.kiefermenard.com \
+    PUBLIC_URL= \
     COOKIE_SECURE=true \
     TRUST_PROXY=true
 RUN mkdir -p /data && chown node:node /data

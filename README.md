@@ -6,12 +6,32 @@ Text copies straight back to the clipboard. An image does too, after this browse
 
 Licensed under the MIT license.
 
+## Download
+
+Installers are on the [Releases](https://github.com/KmanK10/Drop/releases) page. Each app needs a Drop server to sign in to; see Run below.
+
+| Platform | File | Notes |
+| --- | --- | --- |
+| Mac (Apple silicon) | `Drop-<version>-macos-arm64.dmg` | Open the image and drag Drop onto Applications. macOS 12 or later. |
+| Windows (64-bit) | `Drop-<version>-windows-x64-setup.exe` | Installs for the current user and adds a Start menu shortcut. |
+| Windows (64-bit, portable) | `Drop-<version>-windows-x64-portable.zip` | Unzip and run `Drop.exe`. Nothing is installed. |
+| Server | `docker-compose.yml`, `.env.example` | Build and run from this repository; see Run. |
+| iPhone | | Coming to the App Store. |
+
+There is no Android or Linux app.
+
+The Mac and Windows downloads are not yet signed by a known developer, so the first launch shows a warning. Compare the file with `SHA256SUMS.txt` from the same release, then:
+
+- **Mac:** open Drop from Applications. If macOS says it cannot verify the app, choose Done, open System Settings > Privacy & Security, scroll to Security, choose Open Anyway next to Drop, and confirm. You only do this once.
+- **Windows:** if SmartScreen says "Windows protected your PC," choose More info, then Run anyway.
+
 ## Run
 
 One container. The setup secret is not baked into the image. Until the first admin exists, `SETUP_SECRET` must be at least 16 characters. After that it is ignored.
 
 ```bash
-export SETUP_SECRET="$(openssl rand -base64 32)"
+cp .env.example .env
+# Edit .env: set SETUP_SECRET (openssl rand -base64 32) and PUBLIC_URL.
 docker compose up -d --build
 ```
 
@@ -37,7 +57,7 @@ docker run --rm -p 8080:8080 \
 | Variable | Purpose |
 | --- | --- |
 | `SETUP_SECRET` | Required until the first admin exists. Not a password, and not stored. |
-| `PUBLIC_URL` | Origin used in invite links. The image default is `https://drop.kiefermenard.com`. |
+| `PUBLIC_URL` | Origin used in invite links, for example `https://drop.example.com`. Blank by default: Drop then uses the host the request arrived on. |
 | `COOKIE_SECURE` | `true` when the browser uses HTTPS, including through a proxy. |
 | `TRUST_PROXY` | `true` behind a reverse proxy so the forwarded host and client IP are used. |
 | `DATA_DIR` | SQLite directory. `/data` in the container. |
