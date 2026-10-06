@@ -1,8 +1,12 @@
-# Build Drop from this checkout and run it. Put the values in .env next to
-# this file (copy .env.example). Do not commit .env.
+# Run Drop from the published image. Put the values in .env next to this file
+# (copy .env.example). Do not commit .env.
 services:
   drop:
-    build: .
+    image: ghcr.io/kmank10/drop:1.0.0
+    # To build from a checkout of this repository instead, comment out the
+    # image line above, uncomment the build line, and run
+    # docker compose up -d --build
+    # build: .
     restart: unless-stopped
     ports:
       - "${DROP_PORT:-8080}:8080"
