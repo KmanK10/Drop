@@ -15,7 +15,7 @@ Installers are on the [Releases](https://github.com/KmanK10/Drop/releases) page.
 | Mac (Apple silicon) | `Drop-<version>-macos-arm64.dmg` | Open the image and drag Drop onto Applications. macOS 12 or later. |
 | Windows (64-bit) | `Drop-<version>-windows-x64-setup.exe` | Installs for the current user and adds a Start menu shortcut. |
 | Windows (64-bit, portable) | `Drop-<version>-windows-x64-portable.zip` | Unzip and run `Drop.exe`. Nothing is installed. |
-| Server | `docker-compose.yml`, `.env.example` | Build and run from this repository; see Run. |
+| Server | `ghcr.io/kmank10/drop` | Docker image for linux/amd64 and linux/arm64. Each release also attaches `docker-compose.yml` and `env.example`; see Run. |
 | iPhone | | Coming to the App Store. |
 
 There is no Android or Linux app.
@@ -27,13 +27,17 @@ The Mac and Windows downloads are not yet signed by a known developer, so the fi
 
 ## Run
 
-One container. The setup secret is not baked into the image. Until the first admin exists, `SETUP_SECRET` must be at least 16 characters. After that it is ignored.
+One container, published as `ghcr.io/kmank10/drop` for linux/amd64 and linux/arm64. Tags follow the release: `1.0.0`, `1.0`, `1`, and `latest`. The setup secret is not baked into the image. Until the first admin exists, `SETUP_SECRET` must be at least 16 characters. After that it is ignored.
+
+Get `docker-compose.yml` and `env.example` from the [latest release](https://github.com/KmanK10/Drop/releases/latest), or from this repository, into one folder. Then:
 
 ```bash
-cp .env.example .env
+cp env.example .env        # .env.example in a repository checkout
 # Edit .env: set SETUP_SECRET (openssl rand -base64 32) and PUBLIC_URL.
-docker compose up -d --build
+docker compose up -d
 ```
+
+To upgrade, change the image tag in `docker-compose.yml`, then run `docker compose pull && docker compose up -d`. The data volume is kept.
 
 Point a reverse proxy at the published port with HTTPS and WebSockets enabled. One example of `PUBLIC_URL` is [https://drop.kiefermenard.com](https://drop.kiefermenard.com). The proxy should send `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Real-IP`. Devices stay in sync on the same origin at `/api/ws`.
 
@@ -42,15 +46,27 @@ Open `/setup` once, enter the setup secret, and choose the admin username and pa
 To try it on the machine itself, without TLS:
 
 ```bash
-docker build -t drop .
 docker run --rm -p 8080:8080 \
   -e SETUP_SECRET \
   -e PUBLIC_URL=http://127.0.0.1:8080 \
   -e COOKIE_SECURE=false \
   -e TRUST_PROXY=false \
   -v drop-data:/data \
-  drop
+  ghcr.io/kmank10/drop:1.0.0
 ```
+
+### Build from source
+
+If you would rather not use the published image, clone this repository at a release tag and build it yourself. If `docker-compose.yml` in that checkout has an `image:` line, comment it out and uncomment `build: .` (the v1.0.0 tag already uses `build: .`). Then:
+
+```bash
+git clone --branch v1.0.0 https://github.com/KmanK10/Drop.git
+cd Drop
+cp .env.example .env       # set SETUP_SECRET and PUBLIC_URL
+docker compose up -d --build
+```
+
+`docker build -t drop .` builds the same image without Compose.
 
 ### Environment
 
