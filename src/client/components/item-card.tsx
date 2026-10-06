@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Copy, Download, FileText, Lock, Trash2 } from "lucide-react";
 import { messageOf } from "@/lib/api";
 import { canCopyFile, copyFileItem } from "@/lib/clipboard";
-import { formatBytes, formatWhen } from "@/lib/format";
+import { daysLeft, formatBytes, formatWhen } from "@/lib/format";
 import { safeDownloadName, type ItemPlain } from "../../shared/item.ts";
 import { Button } from "@/components/ui/button";
 
@@ -19,6 +19,7 @@ export function ItemCard({
   item,
   unlocked,
   now,
+  ttlMs,
   pendingDelete,
   onAskDelete,
   onDelete,
@@ -26,6 +27,7 @@ export function ItemCard({
   item: ItemRecord;
   unlocked: boolean;
   now: number;
+  ttlMs: number;
   pendingDelete: boolean;
   onAskDelete: () => void;
   onDelete: () => void;
@@ -35,6 +37,7 @@ export function ItemCard({
   const [copyError, setCopyError] = useState("");
   const copyingRef = useRef(false);
   const plain = item.plain;
+  const expiresIn = daysLeft(item.createdAt, ttlMs, now);
 
   async function copyText() {
     if (!plain?.text) return;
@@ -80,10 +83,18 @@ export function ItemCard({
     <article className="min-w-0 max-w-full rounded-xl border border-border bg-card px-4 py-4 shadow-sm">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs uppercase tracking-wide text-muted-foreground">
-            {plain ? (plain.kind === "file" ? "File" : "Text") : item.broken ? "Unreadable" : "Locked"}
-            <span className="px-1.5">·</span>
-            {formatWhen(item.createdAt, now)}
+          <p className="text-xs">
+            <span className="uppercase tracking-wide text-muted-foreground">
+              {plain ? (plain.kind === "file" ? "File" : "Text") : item.broken ? "Unreadable" : "Locked"}
+              <span className="px-1.5">·</span>
+              {formatWhen(item.createdAt, now)}
+            </span>
+            {expiresIn ? (
+              <>
+                <span className="px-1.5 uppercase tracking-wide text-muted-foreground">·</span>
+                <span className="text-destructive">{expiresIn}</span>
+              </>
+            ) : null}
           </p>
           {plain?.kind === "file" ? (
             <h3 className="mt-1 font-medium [overflow-wrap:anywhere]">{plain.name || "Untitled file"}</h3>
@@ -127,32 +138,34 @@ export function ItemCard({
         <p className="mt-3 text-sm text-destructive">This item couldn't be decrypted with the current password.</p>
       ) : null}
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        {plain?.kind === "text" ? (
-          <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={() => void copyText()}>
-            <Copy />
-            {copied ? "Copied" : "Copy"}
-          </Button>
-        ) : null}
-        {plain?.kind === "file" && canCopyFile(plain.mime) ? (
-          <Button size="sm" variant="outline" className="h-11 sm:h-9" disabled={copying} onClick={() => void copyFile()}>
-            <Copy />
-            {copied ? "Copied" : copying ? "Copying…" : "Copy"}
-          </Button>
-        ) : null}
-        {plain?.kind === "file" ? (
-          <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={download}>
-            <Download />
-            Download
-          </Button>
-        ) : null}
+      <div className="mt-4 flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap gap-2">
+          {plain?.kind === "text" ? (
+            <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={() => void copyText()}>
+              <Copy />
+              {copied ? "Copied" : "Copy"}
+            </Button>
+          ) : null}
+          {plain?.kind === "file" && canCopyFile(plain.mime) ? (
+            <Button size="sm" variant="outline" className="h-11 sm:h-9" disabled={copying} onClick={() => void copyFile()}>
+              <Copy />
+              {copied ? "Copied" : copying ? "Copying…" : "Copy"}
+            </Button>
+          ) : null}
+          {plain?.kind === "file" ? (
+            <Button size="sm" variant="outline" className="h-11 sm:h-9" onClick={download}>
+              <Download />
+              Download
+            </Button>
+          ) : null}
+        </div>
         {pendingDelete ? (
-          <Button size="sm" variant="destructive" className="h-11 sm:h-9" onClick={onDelete}>
+          <Button size="sm" variant="destructive" className="h-11 shrink-0 sm:h-9" onClick={onDelete}>
             <Trash2 />
             Delete forever
           </Button>
         ) : (
-          <Button size="sm" variant="ghost" className="h-11 sm:h-9" onClick={onAskDelete}>
+          <Button size="sm" variant="ghost" className="h-11 shrink-0 sm:h-9" onClick={onAskDelete}>
             <Trash2 />
             Delete
           </Button>

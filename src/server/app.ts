@@ -642,6 +642,25 @@ export function createApp(options: CreateAppOptions): DropApp {
     return c.json({ ok: true });
   });
 
+  app.delete("/api/account", (c) => {
+    const user = requireUser(c);
+    if (user instanceof Response) return user;
+    const removed = db.transaction(() => {
+      const fresh = stmts.userById.get(user.id) as UserRow | undefined;
+      if (!fresh) return "missing" as const;
+      if (fresh.role === "admin" && countOf(stmts.adminCount.get()) <= 1) return "last" as const;
+      stmts.deleteInvitesByCreator.run(fresh.id);
+      stmts.deleteUser.run(fresh.id);
+      return "ok" as const;
+    })();
+    if (removed === "missing") return c.json({ error: "That account is not here." }, 404);
+    if (removed === "last") return c.json({ error: "Drop needs at least one admin." }, 409);
+    checkpoint(db);
+    hub.disconnect(user.id);
+    deleteCookie(c, COOKIE_NAME, { path: "/", secure: cookieSecure, sameSite: "Lax" });
+    return c.json({ ok: true });
+  });
+
   app.get("*", (c) => {
     if (c.req.path.startsWith("/api")) return c.json({ error: "Not found." }, 404);
     return serveClient(c, clientDir);

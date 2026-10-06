@@ -8,3 +8,5 @@ data
 tests
 *.md
 !README.md
+clients
+target

@@ -9,7 +9,7 @@ import { Notice } from "@/components/notice";
 import { PasswordField } from "@/components/password-field";
 import { Wordmark } from "@/components/wordmark";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { Meta } from "@/lib/types";
@@ -78,10 +78,6 @@ export function LoginPage({
       <Card className="mt-6">
         <CardHeader>
           <CardTitle>Sign in</CardTitle>
-          <CardDescription>
-            The password stays on this device. Drop receives a verifier so it can recognize you, and a separate key
-            decrypts your items.
-          </CardDescription>
         </CardHeader>
         <CardContent>
           <form className="grid gap-4" onSubmit={(event) => void onSubmit(event)}>

@@ -1,0 +1,1799 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
+
+use drop_core::{
+    days_left, format_bytes, load_settings, now_ms, retention_label, save_settings, Account, CopyPayload, ItemSummary,
+    Settings,
+};
+use eframe::egui::{
+    self, Align, Button, CentralPanel, Color32, Context, Frame, Layout, Margin, RichText, ScrollArea, Stroke,
+    TextEdit, Vec2,
+};
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::biometric::{self, BiometricError};
+use crate::icon;
+use crate::pin;
+use crate::tray::{TrayAction, TrayPorts};
+use crate::worker::{self, Command, WorkerEvent};
+
+const SERVER_HINT: &str = "https://drop.example";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccountForm {
+    None,
+    SetPin,
+    ChangePin,
+    ChangePassword,
+    DeleteAccount,
+}
+
+/// Same colors as the website. Light stays the cream palette. Dark follows
+/// `prefers-color-scheme` through the system theme egui already reports.
+#[derive(Clone, Copy)]
+struct Palette {
+    background: Color32,
+    card: Color32,
+    field: Color32,
+    ink: Color32,
+    muted: Color32,
+    green: Color32,
+    on_green: Color32,
+    danger: Color32,
+    line: Color32,
+    secondary: Color32,
+    hover: Color32,
+    active: Color32,
+    selection: Color32,
+}
+
+impl Palette {
+    fn light() -> Self {
+        Self {
+            background: Color32::from_rgb(0xf7, 0xf3, 0xea),
+            card: Color32::from_rgb(0xff, 0xfd, 0xf8),
+            field: Color32::from_rgb(0xff, 0xfd, 0xf8),
+            ink: Color32::from_rgb(0x1c, 0x19, 0x15),
+            muted: Color32::from_rgb(0x6d, 0x66, 0x5c),
+            green: Color32::from_rgb(0x1d, 0x68, 0x43),
+            on_green: Color32::from_rgb(0xf4, 0xff, 0xf7),
+            danger: Color32::from_rgb(0x9d, 0x34, 0x1c),
+            line: Color32::from_rgb(0xe4, 0xda, 0xc9),
+            secondary: Color32::from_rgb(0xef, 0xe7, 0xd8),
+            hover: Color32::from_rgb(0xe4, 0xf2, 0xe9),
+            active: Color32::from_rgb(0xd7, 0xeb, 0xde),
+            selection: Color32::from_rgb(0xcf, 0xe6, 0xd6),
+        }
+    }
+
+    fn dark() -> Self {
+        Self {
+            background: Color32::from_rgb(0x12, 0x10, 0x0d),
+            card: Color32::from_rgb(0x26, 0x21, 0x1c),
+            field: Color32::from_rgb(0x1c, 0x19, 0x16),
+            ink: Color32::from_rgb(0xf6, 0xf1, 0xe8),
+            muted: Color32::from_rgb(0xd2, 0xc3, 0xb0),
+            green: Color32::from_rgb(0x7d, 0xce, 0xa0),
+            on_green: Color32::from_rgb(0x10, 0x21, 0x17),
+            danger: Color32::from_rgb(0xf0, 0xa0, 0x90),
+            line: Color32::from_rgb(0x53, 0x48, 0x38),
+            secondary: Color32::from_rgb(0x1c, 0x19, 0x16),
+            hover: Color32::from_rgb(0x1e, 0x33, 0x28),
+            active: Color32::from_rgb(0x27, 0x42, 0x33),
+            selection: Color32::from_rgb(0x2f, 0x5a, 0x40),
+        }
+    }
+
+    fn for_theme(theme: egui::Theme) -> Self {
+        match theme {
+            egui::Theme::Dark => Self::dark(),
+            egui::Theme::Light => Self::light(),
+        }
+    }
+}
+
+fn colors(ui: &egui::Ui) -> Palette {
+    Palette::for_theme(ui.ctx().theme())
+}
+
+pub fn run() -> Result<(), String> {
+    let settings_path = drop_core::default_config_dir()
+        .ok_or_else(|| "Couldn't find a folder for the server address.".to_string())?
+        .join("config.json");
+    let settings = load_settings(&settings_path);
+    let rgba = icon::tray_rgba(64);
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([440.0, 720.0])
+            .with_min_inner_size([380.0, 520.0])
+            .with_title("Drop")
+            .with_drag_and_drop(true)
+            .with_icon(egui::IconData {
+                rgba,
+                width: 64,
+                height: 64,
+            }),
+        persist_window: false,
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Drop",
+        options,
+        Box::new(move |cc| {
+            apply_style(&cc.egui_ctx);
+            Ok(Box::new(DropApp::new(settings, settings_path)))
+        }),
+    )
+    .map_err(|error| error.to_string())
+}
+
+struct DropApp {
+    settings_path: PathBuf,
+    server: String,
+    username: String,
+    password: String,
+    password_epoch: u64,
+    draft: String,
+    account: Option<Account>,
+    items: Vec<ItemSummary>,
+    http: bool,
+    status: String,
+    error: String,
+    busy: bool,
+    quit: bool,
+    pending_drops: Vec<PathBuf>,
+    /// A file drag is over this window. The taskbar button cannot take the drop
+    /// itself; hovering that button restores this drop target so the files land here.
+    file_hover: bool,
+    preview_textures: HashMap<String, egui::TextureHandle>,
+    biometrics: bool,
+    /// This Mac has Touch ID. Cached so the sign-in icon does not ask every frame.
+    /// Windows does not draw that icon.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    touch_available: bool,
+    tried_biometrics: bool,
+    refresh_biometrics: bool,
+    biometric_epoch: u64,
+    pin_on: bool,
+    pin_new: String,
+    pin_confirm: String,
+    pin_current: String,
+    pin_entry: String,
+    pin_attempted: String,
+    pin_changed_at: Option<Instant>,
+    pin_epoch: u64,
+    returning: bool,
+    /// Returning sign-in with a PIN shows the PIN until this is turned on.
+    use_password: bool,
+    show_setup: bool,
+    setup_server: String,
+    setup_username: String,
+    form: AccountForm,
+    form_error: String,
+    delete_name: String,
+    pw_current: String,
+    pw_next: String,
+    pw_confirm: String,
+    tx: Sender<Command>,
+    ui_tx: Sender<WorkerEvent>,
+    rx: Receiver<WorkerEvent>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    tray: Option<TrayHandle>,
+}
+
+struct TrayHandle {
+    events: Receiver<TrayAction>,
+    set_tooltip: Box<dyn Fn(String) + Send>,
+    shutdown: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl Drop for TrayHandle {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            shutdown();
+        }
+    }
+}
+
+impl DropApp {
+    fn new(settings: Settings, settings_path: PathBuf) -> Self {
+        crate::window_prefs::load();
+        let (tx, worker_rx) = mpsc::channel();
+        let (event_tx, rx) = mpsc::channel();
+        let ui_tx = event_tx.clone();
+        let worker = worker::spawn(worker_rx, event_tx);
+        let returning = !settings.server_url.trim().is_empty() && !settings.username.trim().is_empty();
+        Self {
+            settings_path,
+            server: settings.server_url,
+            username: settings.username,
+            password: String::new(),
+            password_epoch: 0,
+            draft: String::new(),
+            account: None,
+            items: Vec::new(),
+            http: false,
+            status: String::new(),
+            error: String::new(),
+            busy: false,
+            quit: false,
+            pending_drops: Vec::new(),
+            file_hover: false,
+            preview_textures: HashMap::new(),
+            biometrics: biometric::enrolled(),
+            touch_available: touch_id_hardware(),
+            tried_biometrics: false,
+            refresh_biometrics: false,
+            biometric_epoch: 0,
+            pin_on: pin::enrolled(),
+            pin_new: String::new(),
+            pin_confirm: String::new(),
+            pin_current: String::new(),
+            pin_entry: String::new(),
+            pin_attempted: String::new(),
+            pin_changed_at: None,
+            pin_epoch: 0,
+            returning,
+            use_password: false,
+            show_setup: false,
+            setup_server: String::new(),
+            setup_username: String::new(),
+            form: AccountForm::None,
+            form_error: String::new(),
+            delete_name: String::new(),
+            pw_current: String::new(),
+            pw_next: String::new(),
+            pw_confirm: String::new(),
+            tx,
+            ui_tx,
+            rx,
+            worker: Some(worker),
+            tray: None,
+        }
+    }
+
+    fn send(&mut self, command: Command) {
+        if self.tx.send(command).is_err() {
+            self.error = "Drop stopped responding.".into();
+            self.busy = false;
+        }
+    }
+
+    fn pump(&mut self, ctx: &Context) {
+        self.ensure_tray(ctx);
+        let actions = if let Some(tray) = &self.tray {
+            let mut actions = Vec::new();
+            while let Ok(action) = tray.events.try_recv() {
+                actions.push(action);
+            }
+            actions
+        } else {
+            Vec::new()
+        };
+        for action in actions {
+            self.on_tray(ctx, action);
+        }
+        while let Ok(event) = self.rx.try_recv() {
+            self.on_worker(ctx, event);
+        }
+    }
+
+    fn ensure_tray(&mut self, ctx: &Context) {
+        if self.tray.is_some() {
+            return;
+        }
+        let wake_ctx = ctx.clone();
+        let wake = move || wake_ctx.request_repaint();
+        match start_tray(wake) {
+            Ok(ports) => {
+                self.tray = Some(TrayHandle {
+                    events: ports.events,
+                    set_tooltip: ports.set_tooltip,
+                    shutdown: Some(ports.shutdown),
+                });
+                self.update_tooltip();
+            }
+            Err(error) => {
+                self.error = error;
+            }
+        }
+    }
+
+    fn on_tray(&mut self, ctx: &Context, action: TrayAction) {
+        match action {
+            TrayAction::Open => show_window(ctx),
+            TrayAction::SignOut => self.sign_out(),
+            TrayAction::Quit => self.request_quit(ctx),
+            TrayAction::SetBiometric(enabled) => {
+                if enabled && self.account.is_none() {
+                    show_window(ctx);
+                }
+                self.set_biometrics(enabled);
+            }
+            TrayAction::SetPin(enabled) => {
+                if enabled {
+                    self.open_form(ctx, AccountForm::SetPin);
+                } else {
+                    self.clear_pin();
+                }
+            }
+            TrayAction::ChangePin => self.open_form(ctx, AccountForm::ChangePin),
+            TrayAction::ChangePassword => self.open_form(ctx, AccountForm::ChangePassword),
+            TrayAction::DeleteAccount => self.open_form(ctx, AccountForm::DeleteAccount),
+            TrayAction::Dropped(paths) => {
+                show_window(ctx);
+                if self.account.is_none() {
+                    self.pending_drops.extend(paths);
+                    self.error = "Sign in before dropping files.".into();
+                } else {
+                    self.busy = true;
+                    self.error.clear();
+                    self.send(Command::UploadPaths(paths));
+                }
+            }
+        }
+    }
+
+    fn on_worker(&mut self, ctx: &Context, event: WorkerEvent) {
+        match event {
+            WorkerEvent::Snapshot(snapshot) => {
+                self.http = snapshot.http;
+                self.account = Some(snapshot.account);
+                self.items = snapshot.items;
+                self.preview_textures
+                    .retain(|id, _| self.items.iter().any(|item| item.id == *id));
+                self.pin_entry.zeroize();
+                self.pin_entry.clear();
+                self.pin_attempted.clear();
+                self.busy = false;
+                self.error.clear();
+                self.update_tooltip();
+                if self.refresh_biometrics {
+                    self.refresh_biometrics = false;
+                    self.busy = true;
+                    self.send(Command::PrepareBiometric);
+                }
+                if !self.pending_drops.is_empty() {
+                    let paths = std::mem::take(&mut self.pending_drops);
+                    self.busy = true;
+                    self.send(Command::UploadPaths(paths));
+                }
+            }
+            WorkerEvent::Status(status) => {
+                self.status = status;
+                if self.status.is_empty() {
+                    self.busy = false;
+                }
+            }
+            WorkerEvent::Error(error) => {
+                self.refresh_biometrics = false;
+                self.biometrics = biometric::enrolled();
+                self.busy = false;
+                self.status.clear();
+                if self.form == AccountForm::None {
+                    self.error = error;
+                    show_window(ctx);
+                } else {
+                    self.form_error = error;
+                }
+            }
+            WorkerEvent::BiometricMaterial(bytes) => {
+                self.status = format!("{}…", biometric::label());
+                self.store_biometrics(bytes);
+            }
+            WorkerEvent::BiometricUnlocked { epoch, material } => {
+                if epoch != self.biometric_epoch {
+                    return;
+                }
+                let server = self.server.trim().to_string();
+                let username = self.username.trim().to_string();
+                self.http = server.starts_with("http://");
+                self.send(Command::Restore {
+                    server,
+                    username,
+                    material,
+                });
+            }
+            WorkerEvent::BiometricStored { epoch } => {
+                if epoch != self.biometric_epoch || self.account.is_none() {
+                    biometric::delete();
+                    if epoch == self.biometric_epoch {
+                        self.biometrics = false;
+                        self.busy = false;
+                    }
+                    return;
+                }
+                self.biometrics = true;
+                self.busy = false;
+            }
+            WorkerEvent::BiometricCanceled { epoch } => {
+                if epoch != self.biometric_epoch {
+                    return;
+                }
+                self.biometrics = biometric::enrolled();
+                self.busy = false;
+                self.status.clear();
+            }
+            WorkerEvent::BiometricFailed { epoch, message } => {
+                if epoch != self.biometric_epoch {
+                    return;
+                }
+                self.biometrics = biometric::enrolled();
+                self.error = message;
+                self.busy = false;
+                self.status.clear();
+            }
+            WorkerEvent::SignedOut => {
+                self.account = None;
+                self.items.clear();
+                self.busy = false;
+                self.status.clear();
+                self.show_setup = false;
+                self.note_returning();
+                self.http = self.server.trim().starts_with("http://");
+                self.update_tooltip();
+                show_window(ctx);
+            }
+            WorkerEvent::AccountDeleted => self.account_deleted(ctx),
+            WorkerEvent::Copy(payload) => {
+                self.busy = false;
+                match write_clipboard(payload) {
+                    Ok(()) => self.status = "Copied.".into(),
+                    Err(error) => self.error = error,
+                }
+            }
+            WorkerEvent::PinStored { epoch } => {
+                if epoch != self.pin_epoch || self.account.is_none() {
+                    pin::delete();
+                    if epoch == self.pin_epoch {
+                        self.pin_on = false;
+                        self.form = AccountForm::None;
+                        self.busy = false;
+                    }
+                    return;
+                }
+                self.pin_on = true;
+                self.form = AccountForm::None;
+                self.clear_form_fields();
+                self.busy = false;
+                self.status.clear();
+                self.form_error.clear();
+            }
+            WorkerEvent::PinRejected => {
+                self.busy = false;
+                self.status.clear();
+                if self.form == AccountForm::None {
+                    self.error = "That PIN is wrong.".into();
+                } else {
+                    self.form_error = "That PIN is wrong.".into();
+                }
+            }
+            WorkerEvent::PinFailed { message } => {
+                self.pin_on = pin::enrolled();
+                self.busy = false;
+                self.status.clear();
+                if self.form == AccountForm::None {
+                    self.error = message;
+                    show_window(ctx);
+                } else {
+                    self.form_error = message;
+                }
+            }
+            WorkerEvent::PasswordChanged { snapshot, pin_kept } => {
+                self.http = snapshot.http;
+                self.account = Some(snapshot.account);
+                self.items = snapshot.items;
+                self.pin_on = pin::enrolled();
+                self.form = AccountForm::None;
+                self.clear_form_fields();
+                self.form_error.clear();
+                self.error.clear();
+                self.busy = false;
+                self.status = if pin_kept {
+                    "Password changed.".into()
+                } else {
+                    "Password changed. PIN is off.".into()
+                };
+                self.update_tooltip();
+                if biometric::enrolled() {
+                    self.busy = true;
+                    self.send(Command::PrepareBiometric);
+                }
+            }
+            WorkerEvent::Download(mut file) => {
+                self.busy = false;
+                if let Some(path) = rfd::FileDialog::new().set_file_name(&file.name).save_file() {
+                    if let Err(error) = std::fs::write(&path, file.bytes.as_slice()) {
+                        self.error = format!("Couldn't save that file. {error}");
+                    } else {
+                        self.status = format!("Saved {}.", file.name);
+                    }
+                }
+                file.bytes.zeroize();
+            }
+        }
+    }
+
+    fn request_quit(&mut self, ctx: &Context) {
+        self.quit = true;
+        let _ = self.tx.send(Command::Shutdown {
+            keep_session: keep_session(),
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// The window close button. On Mac, Command-W uses this too.
+    fn dismiss_main_window(&mut self, ctx: &Context) {
+        if self.quit {
+            return;
+        }
+        if crate::window_prefs::close_to_menu_bar() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // Fully closed: menu bar or notification area only. A minimized
+            // window stays in the Dock, because minimize does not request close.
+            #[cfg(target_os = "macos")]
+            crate::mac_tray::set_dock_icon_visible(false);
+        } else {
+            self.request_quit(ctx);
+        }
+    }
+
+    fn set_biometrics(&mut self, enabled: bool) {
+        if self.busy {
+            return;
+        }
+        if enabled {
+            if self.account.is_none() {
+                self.error = "Sign in with your password before turning this on.".into();
+                return;
+            }
+            self.biometrics = true;
+            self.busy = true;
+            self.error.clear();
+            self.send(Command::PrepareBiometric);
+        } else {
+            self.biometric_epoch = self.biometric_epoch.wrapping_add(1);
+            biometric::delete();
+            self.biometrics = false;
+            self.refresh_biometrics = false;
+        }
+    }
+
+    fn open_form(&mut self, ctx: &Context, form: AccountForm) {
+        if self.account.is_none() {
+            show_window(ctx);
+            self.error = match form {
+                AccountForm::ChangePassword => "Sign in before changing the password.".into(),
+                AccountForm::DeleteAccount => "Sign in before deleting the account.".into(),
+                _ => "Sign in with your password before turning this on.".into(),
+            };
+            return;
+        }
+        if form == AccountForm::ChangePin && !self.pin_on {
+            self.open_form(ctx, AccountForm::SetPin);
+            return;
+        }
+        self.form = form;
+        self.form_error.clear();
+        self.clear_form_fields();
+    }
+
+    fn close_form(&mut self) {
+        self.form = AccountForm::None;
+        self.form_error.clear();
+        self.clear_form_fields();
+    }
+
+    fn clear_form_fields(&mut self) {
+        self.pin_new.zeroize();
+        self.pin_new.clear();
+        self.pin_confirm.zeroize();
+        self.pin_confirm.clear();
+        self.pin_current.zeroize();
+        self.pin_current.clear();
+        self.pw_current.zeroize();
+        self.pw_current.clear();
+        self.pw_next.zeroize();
+        self.pw_next.clear();
+        self.pw_confirm.zeroize();
+        self.pw_confirm.clear();
+        self.delete_name.clear();
+    }
+
+    fn clear_pin(&mut self) {
+        self.pin_epoch = self.pin_epoch.wrapping_add(1);
+        pin::delete();
+        self.pin_on = false;
+        if self.form == AccountForm::SetPin || self.form == AccountForm::ChangePin {
+            self.form = AccountForm::None;
+        }
+        self.pin_new.zeroize();
+        self.pin_new.clear();
+        self.pin_confirm.zeroize();
+        self.pin_confirm.clear();
+        self.pin_current.zeroize();
+        self.pin_current.clear();
+    }
+
+    fn save_pin(&mut self) {
+        if self.busy {
+            return;
+        }
+        if let Some(problem) = drop_core::pin_rejection(&self.pin_new, Some(&self.pin_confirm)) {
+            self.form_error = problem.into();
+            return;
+        }
+        self.pin_epoch = self.pin_epoch.wrapping_add(1);
+        let epoch = self.pin_epoch;
+        self.busy = true;
+        self.form_error.clear();
+        if self.form == AccountForm::ChangePin {
+            if let Some(problem) = drop_core::pin_rejection(&self.pin_current, None) {
+                self.busy = false;
+                self.form_error = problem.into();
+                return;
+            }
+            let current = Zeroizing::new(std::mem::take(&mut self.pin_current));
+            let new_pin = Zeroizing::new(std::mem::take(&mut self.pin_new));
+            self.pin_confirm.zeroize();
+            self.pin_confirm.clear();
+            self.send(Command::ChangePin {
+                current,
+                new_pin,
+                epoch,
+            });
+            return;
+        }
+        let pin = Zeroizing::new(std::mem::take(&mut self.pin_new));
+        self.pin_confirm.zeroize();
+        self.pin_confirm.clear();
+        self.send(Command::StorePin { pin, epoch });
+    }
+
+    fn save_password(&mut self) {
+        if self.busy {
+            return;
+        }
+        if self.pw_current.is_empty() {
+            self.form_error = "Enter your current password.".into();
+            return;
+        }
+        if let Some(problem) = drop_core::password_rejection(&self.pw_next, Some(&self.pw_confirm)) {
+            self.form_error = problem.into();
+            return;
+        }
+        let current = Zeroizing::new(std::mem::take(&mut self.pw_current));
+        let next = Zeroizing::new(std::mem::take(&mut self.pw_next));
+        self.pw_confirm.zeroize();
+        self.pw_confirm.clear();
+        self.busy = true;
+        self.form_error.clear();
+        self.send(Command::ChangePassword { current, next });
+    }
+
+    fn unlock_with_pin(&mut self) {
+        if self.busy || self.account.is_some() {
+            return;
+        }
+        if let Some(problem) = drop_core::pin_rejection(&self.pin_entry, None) {
+            self.error = problem.into();
+            return;
+        }
+        let server = self.server.trim().to_string();
+        let username = self.username.trim().to_string();
+        if server.is_empty() || username.is_empty() {
+            self.error = "Enter the server and username.".into();
+            return;
+        }
+        let pin = Zeroizing::new(self.pin_entry.clone());
+        self.pin_attempted = self.pin_entry.clone();
+        self.busy = true;
+        self.error.clear();
+        self.status = "Unlocking…".into();
+        self.http = server.starts_with("http://");
+        self.send(Command::UnlockPin {
+            server,
+            username,
+            pin,
+        });
+    }
+
+    fn poll_pin(&mut self) {
+        if self.account.is_some()
+            || !self.returning
+            || self.show_setup
+            || self.use_password
+            || !self.pin_on
+            || self.busy
+            || self.pin_entry == self.pin_attempted
+        {
+            return;
+        }
+        if drop_core::pin_rejection(&self.pin_entry, None).is_some() {
+            return;
+        }
+        let immediate = self.pin_entry.chars().count() >= 8;
+        let waited = self.pin_changed_at.is_some_and(|then| then.elapsed() >= Duration::from_millis(350));
+        if immediate || waited {
+            self.unlock_with_pin();
+        }
+    }
+
+    fn sign_out(&mut self) {
+        self.forget_local_unlock();
+        self.busy = true;
+        self.send(Command::SignOut);
+    }
+
+    fn forget_local_unlock(&mut self) {
+        self.biometric_epoch = self.biometric_epoch.wrapping_add(1);
+        biometric::delete();
+        self.biometrics = false;
+        self.refresh_biometrics = false;
+        self.close_form();
+        self.clear_pin();
+    }
+
+    fn account_deleted(&mut self, ctx: &Context) {
+        self.forget_local_unlock();
+        self.account = None;
+        self.items.clear();
+        self.busy = false;
+        self.status.clear();
+        self.error.clear();
+        self.show_setup = false;
+        self.note_returning();
+        self.http = self.server.trim().starts_with("http://");
+        self.update_tooltip();
+        show_window(ctx);
+    }
+
+    fn note_returning(&mut self) {
+        self.returning = !self.server.trim().is_empty() && !self.username.trim().is_empty();
+        self.use_password = false;
+    }
+
+    fn submit_delete(&mut self) {
+        if self.busy {
+            return;
+        }
+        let expected = self.account.as_ref().map(|account| account.username.as_str()).unwrap_or("");
+        if !names_match(&self.delete_name, expected) {
+            self.form_error = "Type your username to confirm.".into();
+            return;
+        }
+        self.busy = true;
+        self.form_error.clear();
+        self.send(Command::DeleteAccount);
+    }
+
+    fn unlock_with_biometrics(&mut self) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.error.clear();
+        self.status = "Unlocking…".into();
+        let epoch = self.biometric_epoch;
+        let tx = self.ui_tx.clone();
+        // Touch ID and Windows Hello present a system dialog. Blocking the UI
+        // thread here keeps that dialog from appearing.
+        std::thread::spawn(move || match biometric::load() {
+            Ok(material) => {
+                let _ = tx.send(WorkerEvent::BiometricUnlocked { epoch, material });
+            }
+            Err(BiometricError::Canceled) => {
+                let _ = tx.send(WorkerEvent::BiometricCanceled { epoch });
+            }
+            Err(BiometricError::Failed(message)) => {
+                let _ = tx.send(WorkerEvent::BiometricFailed { epoch, message });
+            }
+        });
+    }
+
+    fn store_biometrics(&mut self, bytes: Zeroizing<Vec<u8>>) {
+        let epoch = self.biometric_epoch;
+        let tx = self.ui_tx.clone();
+        std::thread::spawn(move || {
+            let mut bytes = bytes;
+            let result = biometric::store(&bytes);
+            bytes.zeroize();
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(WorkerEvent::BiometricStored { epoch });
+                }
+                Err(BiometricError::Canceled) => {
+                    let _ = tx.send(WorkerEvent::BiometricCanceled { epoch });
+                }
+                Err(BiometricError::Failed(message)) => {
+                    let _ = tx.send(WorkerEvent::BiometricFailed { epoch, message });
+                }
+            }
+        });
+    }
+
+    fn update_tooltip(&self) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        let tip = if let Some(account) = &self.account {
+            format!("Drop — {}", account.username)
+        } else {
+            "Drop — sign in".into()
+        };
+        (tray.set_tooltip)(tip);
+    }
+
+    fn submit_sign_in(&mut self) {
+        let server = if self.show_setup { self.setup_server.trim() } else { self.server.trim() }.to_string();
+        let username = if self.show_setup { self.setup_username.trim() } else { self.username.trim() }.to_string();
+        if server.is_empty() || username.is_empty() || self.password.is_empty() {
+            self.error = if !self.show_setup && self.returning && !server.is_empty() && !username.is_empty() {
+                "Enter your password.".into()
+            } else {
+                "Enter the server, username, and password.".into()
+            };
+            return;
+        }
+        self.server = server.clone();
+        self.username = username.clone();
+        let _ = save_settings(
+            &self.settings_path,
+            &Settings {
+                server_url: server.clone(),
+                username: username.clone(),
+            },
+        );
+        let password = Zeroizing::new(std::mem::take(&mut self.password));
+        self.password_epoch = self.password_epoch.wrapping_add(1);
+        self.busy = true;
+        self.error.clear();
+        self.status = "Signing in…".into();
+        self.http = server.starts_with("http://");
+        self.refresh_biometrics = biometric::enrolled();
+        self.send(Command::SignIn {
+            server,
+            username,
+            password,
+        });
+    }
+
+    fn sign_in_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = colors(ui);
+        heading(ui);
+        ui.add_space(8.0);
+        ui.label(RichText::new("Sign in").size(18.0).strong().color(colors.ink));
+        let setup = self.show_setup || !self.returning;
+        if setup {
+            ui.label(
+                RichText::new("The password unlocks items on this device. It is kept in memory until you quit Drop, and it is not saved.")
+                    .color(colors.muted)
+                    .size(13.0),
+            );
+            ui.add_space(8.0);
+            if self.show_setup && self.returning {
+                labeled(ui, "Server", &mut self.setup_server, SERVER_HINT);
+                labeled(ui, "Username", &mut self.setup_username, "");
+            } else {
+                labeled(ui, "Server", &mut self.server, SERVER_HINT);
+                labeled(ui, "Username", &mut self.username, "");
+            }
+            self.password_field(ui);
+            self.http_note(ui);
+            notice(ui, &self.error, &self.status);
+            ui.add_space(8.0);
+            self.sign_in_button(ui, &colors);
+            if self.returning {
+                if ui.add_enabled(!self.busy, Button::new("Back")).clicked() {
+                    self.show_setup = false;
+                    self.password.zeroize();
+                    self.password.clear();
+                    self.error.clear();
+                }
+            }
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(format!(
+                    "Accounts are invite-only. Ask the person who runs this Drop for a username. {}",
+                    close_note()
+                ))
+                .color(colors.muted)
+                .size(12.0),
+            );
+        } else if self.pin_on && !self.use_password {
+            self.pin_field(ui);
+            self.http_note(ui);
+            notice(ui, &self.error, &self.status);
+            self.biometric_unlock(ui, &colors, false);
+            self.use_password_button(ui);
+            self.setup_button(ui);
+        } else {
+            self.password_field(ui);
+            self.http_note(ui);
+            notice(ui, &self.error, &self.status);
+            ui.add_space(8.0);
+            self.biometric_unlock(ui, &colors, true);
+            if self.pin_on {
+                self.use_pin_button(ui);
+            }
+            self.setup_button(ui);
+        }
+    }
+
+    /// Password sign-in puts Touch ID to the right of Sign in. The PIN screen
+    /// has no Sign in button, so the same icon sits on the right by itself.
+    /// Windows Hello stays a labeled button.
+    fn biometric_unlock(&mut self, ui: &mut egui::Ui, colors: &Palette, beside_sign_in: bool) {
+        #[cfg(target_os = "macos")]
+        {
+            let show = touch_id_icon_visible(self.touch_available, self.biometrics);
+            if beside_sign_in {
+                ui.horizontal(|ui| {
+                    self.sign_in_button(ui, colors);
+                    if show {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            self.touch_id_button(ui, colors.ink);
+                        });
+                    }
+                });
+            } else if show {
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        self.touch_id_button(ui, colors.ink);
+                    });
+                });
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if beside_sign_in {
+                self.sign_in_button(ui, colors);
+            }
+            self.biometric_button(ui);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn touch_id_button(&mut self, ui: &mut egui::Ui, ink: Color32) {
+        let mark = touch_id_icon(ui, ink, !self.busy);
+        if mark.clicked() {
+            self.unlock_with_biometrics();
+        }
+    }
+
+    fn password_field(&mut self, ui: &mut egui::Ui) {
+        let colors = colors(ui);
+        ui.label(RichText::new("Password").color(colors.ink));
+        let password_id = egui::Id::new(("drop-password", self.password_epoch));
+        let response = ui.add(
+            TextEdit::singleline(&mut self.password)
+                .password(true)
+                .id(password_id)
+                .desired_width(f32::INFINITY)
+                .hint_text(""),
+        );
+        if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+            self.submit_sign_in();
+        }
+    }
+
+    fn pin_field(&mut self, ui: &mut egui::Ui) {
+        let colors = colors(ui);
+        ui.label(RichText::new("PIN").color(colors.ink));
+        let response = ui.add(
+            TextEdit::singleline(&mut self.pin_entry)
+                .password(true)
+                .desired_width(f32::INFINITY)
+                .hint_text(""),
+        );
+        if response.changed() {
+            self.pin_changed_at = Some(Instant::now());
+            self.poll_pin();
+        }
+        if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) && drop_core::pin_rejection(&self.pin_entry, None).is_none() {
+            self.pin_attempted.clear();
+            self.pin_changed_at = Some(Instant::now() - Duration::from_secs(1));
+            self.poll_pin();
+        }
+    }
+
+    fn sign_in_button(&mut self, ui: &mut egui::Ui, colors: &Palette) {
+        let button = ui.add_enabled(
+            !self.busy,
+            primary_button(if self.busy { "Signing in…" } else { "Sign in" }, colors),
+        );
+        if button.clicked() {
+            self.submit_sign_in();
+        }
+    }
+
+    fn biometric_button(&mut self, ui: &mut egui::Ui) {
+        if !self.biometrics {
+            return;
+        }
+        ui.add_space(8.0);
+        let unlock = ui.add_enabled(!self.busy, Button::new(biometric::label()));
+        if unlock.clicked() {
+            self.unlock_with_biometrics();
+        }
+    }
+
+    fn use_password_button(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        if ui.add_enabled(!self.busy, Button::new("Use password")).clicked() {
+            self.pin_entry.clear();
+            self.pin_attempted.clear();
+            self.password.zeroize();
+            self.password.clear();
+            self.error.clear();
+            self.use_password = true;
+        }
+    }
+
+    fn use_pin_button(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        if ui.add_enabled(!self.busy, Button::new("Use PIN")).clicked() {
+            self.password.zeroize();
+            self.password.clear();
+            self.pin_entry.clear();
+            self.pin_attempted.clear();
+            self.error.clear();
+            self.use_password = false;
+        }
+    }
+
+    fn setup_button(&mut self, ui: &mut egui::Ui) {
+        if ui.add_enabled(!self.busy, Button::new("Change server or account")).clicked() {
+            self.setup_server = self.server.clone();
+            self.setup_username = self.username.clone();
+            self.password.zeroize();
+            self.password.clear();
+            self.pin_entry.clear();
+            self.pin_attempted.clear();
+            self.error.clear();
+            self.show_setup = true;
+        }
+    }
+
+    fn http_note(&self, ui: &mut egui::Ui) {
+        if self.http || self.server.trim().starts_with("http://") {
+            let colors = colors(ui);
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("This connection is not HTTPS. The password still stays on this device, but the network can see the session.")
+                    .color(colors.muted)
+                    .size(12.0),
+            );
+        }
+    }
+
+    fn clipboard_ui(&mut self, ui: &mut egui::Ui, #[allow(unused_variables)] ctx: &Context) {
+        let account = self.account.clone();
+        let Some(account) = account else {
+            return;
+        };
+        let _ = ctx;
+        heading(ui);
+        let colors = colors(ui);
+        ui.label(
+            RichText::new(format!(
+                "{} · {} of {} · kept {}",
+                account.username,
+                format_bytes(account.used_bytes),
+                format_bytes(account.quota_bytes),
+                retention_label(account.ttl_ms)
+            ))
+            .color(colors.muted)
+            .size(12.0),
+        );
+        if self.http {
+            ui.label(
+                RichText::new("This connection is not HTTPS. Items are still encrypted before they are uploaded.")
+                    .color(colors.muted)
+                    .size(12.0),
+            );
+        }
+        ui.add_space(8.0);
+        ui.add(
+            TextEdit::multiline(&mut self.draft)
+                .desired_rows(4)
+                .desired_width(f32::INFINITY)
+                .hint_text("Paste or write something"),
+        );
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!self.busy, primary_button("Save text", &colors)).clicked() {
+                let text = std::mem::take(&mut self.draft);
+                self.busy = true;
+                self.error.clear();
+                self.send(Command::UploadText(text));
+            }
+            if ui.add_enabled(!self.busy, Button::new("Paste")).clicked() {
+                self.paste();
+            }
+            if ui.add_enabled(!self.busy, Button::new("Upload file…")).clicked() {
+                self.pick_files();
+            }
+        });
+        notice(ui, &self.error, &self.status);
+        ui.add_space(8.0);
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if self.items.is_empty() {
+                ui.label(RichText::new("Nothing here yet. Drop a file on this window, or save a note.").color(colors.muted));
+            }
+            let items = self.items.clone();
+            for item in items {
+                self.item_card(ui, &item);
+                ui.add_space(8.0);
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(RichText::new(close_note()).color(colors.muted).size(11.0));
+    }
+
+    fn item_card(&mut self, ui: &mut egui::Ui, item: &ItemSummary) {
+        let colors = colors(ui);
+        let expires_in = self
+            .account
+            .as_ref()
+            .and_then(|account| days_left(item.created_at, account.ttl_ms, now_ms()));
+        Frame::none()
+            .fill(colors.card)
+            .stroke(Stroke::new(1.0_f32, colors.line))
+            .inner_margin(Margin::same(10.0))
+            .rounding(8.0)
+            .show(ui, |ui| {
+                ui.label(RichText::new(&item.title).strong().color(colors.ink));
+                if let Some(preview) = item.preview_text.as_deref().filter(|text| !text.is_empty()) {
+                    ui.label(RichText::new(preview).color(colors.ink).size(13.0));
+                }
+                if let Some(texture) = self.preview_texture(ui.ctx(), item) {
+                    ui.add(
+                        egui::Image::from_texture(&texture)
+                            .max_size(Vec2::new(160.0, 120.0))
+                            .rounding(8.0),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.label(RichText::new(format!("{} · {}", item.detail, item.when)).color(colors.muted).size(12.0));
+                    if let Some(left) = &expires_in {
+                        ui.label(RichText::new(format!(" · {left}")).color(colors.danger).size(12.0));
+                    }
+                });
+                ui.push_id(&item.id, |ui| {
+                    ui.horizontal(|ui| {
+                        if item.can_copy
+                            && ui
+                                .add_enabled(!self.busy, Button::new(RichText::new("Copy").color(colors.green)))
+                                .clicked()
+                        {
+                            self.busy = true;
+                            self.error.clear();
+                            self.send(Command::Copy(item.id.clone()));
+                        }
+                        if ui
+                            .add_enabled(!self.busy, Button::new(RichText::new("Download").color(colors.green)))
+                            .clicked()
+                        {
+                            self.busy = true;
+                            self.error.clear();
+                            self.send(Command::Download(item.id.clone()));
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.add_enabled_ui(!self.busy, |ui| {
+                                let trash = trash_mark(ui, colors.danger).on_hover_text("Delete");
+                                if trash.clicked() {
+                                    self.busy = true;
+                                    self.error.clear();
+                                    self.send(Command::Delete(item.id.clone()));
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+    }
+
+    fn paste(&mut self) {
+        self.error.clear();
+        let mut clipboard = match arboard::Clipboard::new() {
+            Ok(clipboard) => clipboard,
+            Err(_) => {
+                self.error = "Couldn't read the clipboard.".into();
+                return;
+            }
+        };
+        if let Ok(text) = clipboard.get_text() {
+            if !text.trim().is_empty() {
+                self.busy = true;
+                self.send(Command::UploadText(text));
+                return;
+            }
+        }
+        if let Ok(image) = clipboard.get_image() {
+            match rgba_to_png(image.width, image.height, &image.bytes) {
+                Ok(bytes) => {
+                    self.busy = true;
+                    self.send(Command::UploadBytes {
+                        name: "pasted.png".into(),
+                        mime: "image/png".into(),
+                        bytes: Zeroizing::new(bytes),
+                    });
+                }
+                Err(error) => self.error = error,
+            }
+            return;
+        }
+        self.error = "The clipboard is empty.".into();
+    }
+
+    fn pick_files(&mut self) {
+        let Some(paths) = rfd::FileDialog::new().pick_files() else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+        self.busy = true;
+        self.error.clear();
+        self.send(Command::UploadPaths(paths));
+    }
+
+    /// Files dropped on the window use the same upload path as a tray or Dock drop.
+    fn accept_window_drops(&mut self, ctx: &Context) {
+        let (hovering, dropped) = ctx.input(|input| {
+            let hovering = !input.raw.hovered_files.is_empty();
+            let dropped = input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect::<Vec<_>>();
+            (hovering, dropped)
+        });
+        if hovering && !self.file_hover {
+            show_window(ctx);
+        }
+        self.file_hover = hovering;
+        if !dropped.is_empty() {
+            self.file_hover = false;
+            self.on_tray(ctx, TrayAction::Dropped(dropped));
+        }
+    }
+
+    fn preview_texture(&mut self, ctx: &Context, item: &ItemSummary) -> Option<egui::TextureHandle> {
+        if let Some(texture) = self.preview_textures.get(&item.id) {
+            return Some(texture.clone());
+        }
+        let bytes = item.preview_image.as_ref()?;
+        let image = image::load_from_memory(bytes).ok()?;
+        let rgba = image.to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [rgba.width() as usize, rgba.height() as usize],
+            rgba.as_raw(),
+        );
+        let texture = ctx.load_texture(format!("preview-{}", item.id), color, egui::TextureOptions::LINEAR);
+        self.preview_textures.insert(item.id.clone(), texture.clone());
+        Some(texture)
+    }
+}
+
+impl DropApp {
+    fn show_account_form(&mut self, ctx: &Context) {
+        if self.form == AccountForm::None {
+            return;
+        }
+        let title = match self.form {
+            AccountForm::SetPin => "Set PIN",
+            AccountForm::ChangePin => "Change PIN",
+            AccountForm::ChangePassword => "Change password",
+            AccountForm::DeleteAccount => "Delete account",
+            AccountForm::None => "Drop",
+        };
+        let height = if self.form == AccountForm::DeleteAccount { 280.0 } else { 460.0 };
+        let builder = egui::ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size([400.0, height])
+            .with_min_inner_size([360.0, 240.0])
+            .with_resizable(false);
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("drop-account-form"),
+            builder,
+            |ui_ctx, class| {
+                #[cfg(target_os = "macos")]
+                let close_shortcut = class != egui::ViewportClass::Embedded && command_w_pressed(ui_ctx);
+                #[cfg(not(target_os = "macos"))]
+                let close_shortcut = false;
+                if class != egui::ViewportClass::Embedded
+                    && (ui_ctx.input(|input| input.viewport().close_requested()) || close_shortcut)
+                {
+                    self.close_form();
+                    ui_ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    return;
+                }
+                let body = |ui: &mut egui::Ui| self.account_form_ui(ui);
+                if class == egui::ViewportClass::Embedded {
+                    egui::Window::new(title)
+                        .collapsible(false)
+                        .resizable(false)
+                        .show(ui_ctx, body);
+                } else {
+                    CentralPanel::default().show(ui_ctx, body);
+                }
+            },
+        );
+    }
+
+    fn account_form_ui(&mut self, ui: &mut egui::Ui) {
+        let colors = colors(ui);
+        match self.form {
+            AccountForm::SetPin | AccountForm::ChangePin => {
+                if self.form == AccountForm::ChangePin {
+                    secret_field(ui, "Current PIN", &mut self.pin_current, "");
+                }
+                secret_field(ui, "New PIN", &mut self.pin_new, "4 to 8 digits");
+                secret_field(ui, "Confirm PIN", &mut self.pin_confirm, "");
+                ui.label(RichText::new("Use 4 to 8 digits.").color(colors.muted).size(12.0));
+                notice(ui, &self.form_error, "");
+                ui.horizontal(|ui| {
+                    let label = if self.busy { "Saving…" } else { "Save" };
+                    if ui.add_enabled(!self.busy, primary_button(label, &colors)).clicked() {
+                        self.save_pin();
+                    }
+                    if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+                        self.close_form();
+                    }
+                });
+            }
+            AccountForm::ChangePassword => {
+                secret_field(ui, "Current password", &mut self.pw_current, "");
+                secret_field(ui, "New password", &mut self.pw_next, "");
+                secret_field(ui, "Confirm new password", &mut self.pw_confirm, "");
+                if self.pin_on {
+                    ui.label(
+                        RichText::new("Changing the password turns the PIN off.")
+                            .color(colors.muted)
+                            .size(12.0),
+                    );
+                }
+                notice(ui, &self.form_error, "");
+                ui.horizontal(|ui| {
+                    let label = if self.busy { "Saving…" } else { "Save" };
+                    if ui.add_enabled(!self.busy, primary_button(label, &colors)).clicked() {
+                        self.save_password();
+                    }
+                    if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+                        self.close_form();
+                    }
+                });
+            }
+            AccountForm::DeleteAccount => {
+                ui.label(RichText::new("Danger zone").strong().color(colors.danger));
+                ui.label(RichText::new("Type your username, then delete the account.").color(colors.muted).size(12.0));
+                labeled(ui, "Username", &mut self.delete_name, "");
+                notice(ui, &self.form_error, "");
+                ui.horizontal(|ui| {
+                    let label = if self.busy { "Deleting…" } else { "Delete account" };
+                    let delete = ui.add_enabled(!self.busy, Button::new(RichText::new(label).color(colors.danger)));
+                    if delete.clicked() {
+                        self.submit_delete();
+                    }
+                    if ui.add_enabled(!self.busy, Button::new("Cancel")).clicked() {
+                        self.close_form();
+                    }
+                });
+            }
+            AccountForm::None => {}
+        }
+    }
+}
+
+impl eframe::App for DropApp {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "windows")]
+        {
+            crate::win_tray::apply_taskbar_icon();
+            crate::win_menu::sync(ctx);
+            while let Some(command) = crate::win_menu::poll() {
+                self.on_windows_option(ctx, command);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        crate::mac_tray::refresh_command_menus();
+        self.pump(ctx);
+        self.accept_window_drops(ctx);
+        self.poll_pin();
+        self.show_account_form(ctx);
+        if self.account.is_none() && !self.tried_biometrics && self.biometrics && !self.busy {
+            self.tried_biometrics = true;
+            self.unlock_with_biometrics();
+        }
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        #[cfg(target_os = "macos")]
+        let close_shortcut = command_w_pressed(ctx);
+        #[cfg(not(target_os = "macos"))]
+        let close_shortcut = false;
+        if close_requested || close_shortcut {
+            self.dismiss_main_window(ctx);
+        }
+        CentralPanel::default().show(ctx, |ui| {
+            if self.account.is_some() {
+                self.clipboard_ui(ui, ctx);
+            } else {
+                self.sign_in_ui(ui);
+            }
+        });
+        if self.file_hover {
+            paint_drop_overlay(ctx);
+        }
+        ctx.request_repaint_after(Duration::from_millis(200));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let _ = self.tx.send(Command::Shutdown {
+            keep_session: keep_session(),
+        });
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn keep_session() -> bool {
+    biometric::enrolled() || pin::enrolled()
+}
+
+fn close_note() -> &'static str {
+    if !crate::window_prefs::close_to_menu_bar() {
+        return "Closing this window quits Drop.";
+    }
+    if cfg!(target_os = "macos") {
+        "Closing this window keeps Drop in the menu bar."
+    } else {
+        "Closing this window keeps Drop in the notification area."
+    }
+}
+
+/// Command-W, with no Shift, Option, or Control. Consumed so a text field does not also take it.
+#[cfg(target_os = "macos")]
+fn command_w_pressed(ctx: &Context) -> bool {
+    ctx.input_mut(|input| {
+        let hit = input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::W,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.command && !modifiers.shift && !modifiers.alt && !modifiers.ctrl
+            )
+        });
+        if hit {
+            input.events.retain(|event| {
+                !matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::W,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.command && !modifiers.shift && !modifiers.alt && !modifiers.ctrl
+                )
+            });
+        }
+        hit
+    })
+}
+
+fn paint_drop_overlay(ctx: &Context) {
+    let colors = Palette::for_theme(ctx.theme());
+    let rect = ctx.screen_rect().shrink(8.0);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop-overlay")));
+    let [red, green, blue, _] = colors.green.to_array();
+    painter.rect_filled(rect, 10.0, Color32::from_rgba_unmultiplied(red, green, blue, 36));
+    painter.rect_stroke(rect, 10.0, Stroke::new(2.0_f32, colors.green));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "Drop to upload",
+        egui::FontId::proportional(18.0),
+        colors.ink,
+    );
+}
+
+fn show_window(ctx: &Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    #[cfg(target_os = "macos")]
+    crate::mac_tray::activate();
+    #[cfg(target_os = "windows")]
+    crate::win_tray::reveal_main_window();
+}
+
+fn apply_style(ctx: &Context) {
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        let palette = Palette::for_theme(theme);
+        let mut style = (*ctx.style_of(theme)).clone();
+        style.visuals = paint(theme, palette);
+        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+        style.spacing.button_padding = Vec2::new(10.0, 6.0);
+        ctx.set_style_of(theme, style);
+    }
+    ctx.set_theme(egui::ThemePreference::System);
+}
+
+fn paint(theme: egui::Theme, palette: Palette) -> egui::Visuals {
+    let mut visuals = match theme {
+        egui::Theme::Dark => egui::Visuals::dark(),
+        egui::Theme::Light => egui::Visuals::light(),
+    };
+    visuals.window_fill = palette.background;
+    visuals.panel_fill = palette.background;
+    visuals.extreme_bg_color = palette.field;
+    visuals.faint_bg_color = palette.secondary;
+    visuals.code_bg_color = palette.card;
+    visuals.override_text_color = Some(palette.ink);
+    visuals.hyperlink_color = palette.green;
+    visuals.warn_fg_color = palette.danger;
+    visuals.error_fg_color = palette.danger;
+    visuals.selection.bg_fill = palette.selection;
+    visuals.selection.stroke.color = palette.green;
+    let widgets = &mut visuals.widgets;
+    for widget in [
+        &mut widgets.noninteractive,
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        widget.fg_stroke.color = palette.ink;
+        widget.bg_stroke.color = palette.line;
+    }
+    widgets.noninteractive.bg_fill = palette.card;
+    widgets.inactive.bg_fill = palette.card;
+    widgets.hovered.bg_fill = palette.hover;
+    widgets.active.bg_fill = palette.active;
+    widgets.open.bg_fill = palette.card;
+    visuals
+}
+
+/// The row under the title bar. On Windows the Options menu is the native
+/// title-bar menu, not a button in this row.
+fn heading(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        wordmark(ui);
+    });
+}
+
+impl DropApp {
+    #[cfg(target_os = "windows")]
+    fn on_windows_option(&mut self, ctx: &Context, command: crate::options::WindowsOption) {
+        let action = match command {
+            crate::options::WindowsOption::CloseToNotification => {
+                crate::window_prefs::toggle();
+                ctx.request_repaint();
+                return;
+            }
+            crate::options::WindowsOption::Hello => TrayAction::SetBiometric(!crate::biometric::enrolled()),
+            crate::options::WindowsOption::Pin => TrayAction::SetPin(!crate::pin::enrolled()),
+            crate::options::WindowsOption::ChangePin => TrayAction::ChangePin,
+            crate::options::WindowsOption::ChangePassword => TrayAction::ChangePassword,
+            crate::options::WindowsOption::SignOut => TrayAction::SignOut,
+            crate::options::WindowsOption::DeleteAccount => TrayAction::DeleteAccount,
+            crate::options::WindowsOption::Quit => TrayAction::Quit,
+        };
+        self.on_tray(ctx, action);
+    }
+}
+
+fn wordmark(ui: &mut egui::Ui) {
+    let colors = colors(ui);
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 16.0, colors.green);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "D",
+        egui::FontId::proportional(18.0),
+        colors.on_green,
+    );
+    ui.vertical(|ui| {
+        ui.label(RichText::new("Drop").size(22.0).strong().color(colors.ink));
+        ui.label(RichText::new("Private clipboard").size(11.0).color(colors.muted));
+    });
+}
+
+fn names_match(typed: &str, expected: &str) -> bool {
+    let typed = typed.trim();
+    let expected = expected.trim();
+    !typed.is_empty() && typed.eq_ignore_ascii_case(expected)
+}
+
+fn secret_field(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
+    let colors = colors(ui);
+    ui.label(RichText::new(label).color(colors.ink));
+    ui.add(TextEdit::singleline(value).password(true).desired_width(f32::INFINITY).hint_text(hint));
+}
+
+fn labeled(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str) {
+    let colors = colors(ui);
+    ui.label(RichText::new(label).color(colors.ink));
+    let mut edit = TextEdit::singleline(value).desired_width(f32::INFINITY);
+    if !hint.is_empty() {
+        edit = edit.hint_text(hint);
+    }
+    ui.add(edit);
+}
+
+/// The iPhone row's delete control: an outline trash glyph in a circle, tinted
+/// with the danger color. One tap deletes.
+fn trash_mark(ui: &mut egui::Ui, ink: Color32) -> egui::Response {
+    let size = 28.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let texture = trash_texture(ui.ctx());
+        ui.painter().image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            ink,
+        );
+    }
+    response
+}
+
+fn trash_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let id = egui::Id::new("drop-trash-mark");
+    if let Some(handle) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return handle;
+    }
+    let rgba = icon::trash_mark_rgba(64);
+    let image = egui::ColorImage::from_rgba_unmultiplied([64, 64], &rgba);
+    let handle = ctx.load_texture("drop-trash-mark", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
+    handle
+}
+
+/// The sign-in icon is the unlock control. It is not the menu checkmark,
+/// which turns Touch ID on and off.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn touch_id_icon_visible(available: bool, enrolled: bool) -> bool {
+    available && enrolled
+}
+
+#[cfg(target_os = "macos")]
+fn touch_id_hardware() -> bool {
+    biometric::available()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn touch_id_hardware() -> bool {
+    false
+}
+
+/// Official SF Symbol `touchid`. The hit target stays 44 points.
+/// The symbol is a template, tinted with the text color for light and dark.
+#[cfg(target_os = "macos")]
+fn touch_id_icon(ui: &mut egui::Ui, ink: Color32, enabled: bool) -> egui::Response {
+    let tap = 44.0;
+    let sense = if enabled { egui::Sense::click() } else { egui::Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(tap), sense);
+    if ui.is_rect_visible(rect) {
+        if let Some(texture) = touch_id_texture(ui.ctx()) {
+            let tint = if enabled { ink } else { ink.gamma_multiply(0.45) };
+            let glyph = egui::Rect::from_center_size(rect.center(), Vec2::splat(28.0));
+            ui.painter().image(
+                texture.id(),
+                glyph,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                tint,
+            );
+        }
+    }
+    response.on_hover_text("Unlock with Touch ID")
+}
+
+#[cfg(target_os = "macos")]
+fn touch_id_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new("drop-touch-id-symbol");
+    let missing = egui::Id::new("drop-touch-id-symbol-missing");
+    if let Some(handle) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
+        return Some(handle);
+    }
+    if ctx.data(|data| data.get_temp::<bool>(missing).unwrap_or(false)) {
+        return None;
+    }
+    let Some(symbol) = crate::icon::touch_id_symbol() else {
+        ctx.data_mut(|data| data.insert_temp(missing, true));
+        return None;
+    };
+    let image = egui::ColorImage::from_rgba_unmultiplied([symbol.width, symbol.height], &symbol.rgba);
+    let handle = ctx.load_texture("drop-touch-id-symbol", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|data| data.insert_temp(id, handle.clone()));
+    Some(handle)
+}
+
+fn primary_button<'a>(label: &'a str, colors: &Palette) -> Button<'a> {
+    Button::new(RichText::new(label).color(colors.on_green))
+        .fill(colors.green)
+        .min_size(Vec2::new(0.0, 32.0))
+}
+
+fn notice(ui: &mut egui::Ui, error: &str, status: &str) {
+    let colors = colors(ui);
+    if !error.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(error).color(colors.danger));
+    } else if !status.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(status).color(colors.muted));
+    }
+}
+
+fn write_clipboard(payload: CopyPayload) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|_| "Couldn't copy that.".to_string())?;
+    match payload {
+        CopyPayload::Text(mut text) => {
+            clipboard
+                .set_text(text.as_str())
+                .map_err(|_| "Couldn't copy that.".to_string())?;
+            text.zeroize();
+            Ok(())
+        }
+        CopyPayload::Image { mut bytes, .. } => {
+            let image = image::load_from_memory(&bytes).map_err(|_| {
+                "Couldn't copy that image. Download it instead.".to_string()
+            })?;
+            let rgba = image.to_rgba8();
+            let width = rgba.width() as usize;
+            let height = rgba.height() as usize;
+            clipboard
+                .set_image(arboard::ImageData {
+                    width,
+                    height,
+                    bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+                })
+                .map_err(|_| "Couldn't copy that.".to_string())?;
+            bytes.zeroize();
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod touch_id_sign_in_tests {
+    use super::touch_id_icon_visible;
+
+    #[test]
+    fn icon_shows_only_when_touch_id_exists_and_is_on() {
+        assert!(!touch_id_icon_visible(false, false));
+        assert!(!touch_id_icon_visible(false, true));
+        assert!(!touch_id_icon_visible(true, false));
+        assert!(touch_id_icon_visible(true, true));
+    }
+}
+
+fn rgba_to_png(width: usize, height: usize, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let image = image::RgbaImage::from_raw(width as u32, height as u32, bytes.to_vec())
+        .ok_or_else(|| "Couldn't read that image.".to_string())?;
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|_| "Couldn't read that image.".to_string())?;
+    Ok(png)
+}
+
+#[cfg(target_os = "windows")]
+fn start_tray(wake: impl Fn() + Send + 'static) -> Result<TrayPorts, String> {
+    crate::win_tray::start(wake)
+}
+
+#[cfg(target_os = "macos")]
+fn start_tray(wake: impl Fn() + Send + 'static) -> Result<TrayPorts, String> {
+    crate::mac_tray::start(wake)
+}
